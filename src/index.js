@@ -4,7 +4,7 @@ import helmet from 'helmet';
 import cors from 'cors';
 import morgan from 'morgan';
 import { RateLimiterMemory } from 'rate-limiter-flexible';
-import { request as ureq } from 'undici';
+import { request as ureq, fetch } from 'undici';
 
 const {
   PORT = 3000,
@@ -138,4 +138,21 @@ app.post('/fm/request', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`FM proxy running on port ${PORT}`));
+/* 🧪 TEST ROUTE — check outbound connectivity */
+app.get('/test', async (req, res) => {
+  try {
+    const response = await fetch('https://www.google.com');
+    const html = await response.text();
+    res
+      .status(200)
+      .send(
+        `✅ Connected to Google!<br>Status: ${response.status}<br><pre>${html.substring(0, 300)}...</pre>`
+      );
+  } catch (err) {
+    res.status(500).send(`❌ Connection failed: ${err.message}`);
+  }
+});
+
+app.listen(PORT, () =>
+  console.log(`FM proxy running on port ${PORT}`)
+);
