@@ -87,6 +87,65 @@ function okAuth(req) {
 
 app.get('/health', (_, res) => res.type('text/plain').send('OK'));
 
+/* 🧪 TEST ROUTE — check outbound connectivity */
+app.get('/test', async (req, res) => {
+  try {
+    const response = await fetch('https://www.google.com');
+    const html = await response.text();
+    res
+      .status(200)
+      .send(
+        `✅ Connected to Google!<br>Status: ${response.status}<br><pre>${html.substring(0, 300)}...</pre>`
+      );
+  } catch (err) {
+    res.status(500).send(`❌ Connection failed: ${err.message}`);
+  }
+});
+
+/* 🌐 GET public IP via a reliable external service */
+app.get('/whois-ip', async (req, res) => {
+  try {
+    // protect route with your existing API secret check
+    if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
+
+    // try a couple of reliable "what is my IP" endpoints (fallback)
+    const endpoints = [
+      'https://api.ipify.org?format=json',        // returns { ip: "x.x.x.x" }
+      'https://ifconfig.me/all.json',             // returns JSON including "ip_addr"
+      'https://checkip.amazonaws.com/'            // returns plain "x.x.x.x\n"
+    ];
+
+    let ip = null;
+    for (const url of endpoints) {
+      try {
+        const r = await fetch(url);
+        if (!r.ok) continue;
+        const text = await r.text();
+        // try parse JSON first
+        try {
+          const j = JSON.parse(text);
+          // api.ipify => { ip: "..." }
+          if (j.ip) { ip = j.ip; break; }
+          // ifconfig.me => ip_addr or ip_address
+          if (j.ip_addr) { ip = j.ip_addr; break; }
+          if (j.ip_address) { ip = j.ip_address; break; }
+        } catch {
+          // not JSON — maybe plain text (checkip.amazonaws.com)
+          const cand = text.trim();
+          if (cand && cand.match(/^\d{1,3}(\.\d{1,3}){3}$/)) { ip = cand; break; }
+        }
+      } catch {
+        // ignore and try next endpoint
+      }
+    }
+
+    if (!ip) return res.status(502).json({ error: 'could not determine public IP' });
+    return res.status(200).json({ ip });
+  } catch (err) {
+    return res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
 app.post('/fm/request', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
@@ -135,21 +194,6 @@ app.post('/fm/request', async (req, res) => {
     res.status(r.status).json(r.json);
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
-  }
-});
-
-/* 🧪 TEST ROUTE — check outbound connectivity */
-app.get('/test', async (req, res) => {
-  try {
-    const response = await fetch('https://www.google.com');
-    const html = await response.text();
-    res
-      .status(200)
-      .send(
-        `✅ Connected to Google!<br>Status: ${response.status}<br><pre>${html.substring(0, 300)}...</pre>`
-      );
-  } catch (err) {
-    res.status(500).send(`❌ Connection failed: ${err.message}`);
   }
 });
 
