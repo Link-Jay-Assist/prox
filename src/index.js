@@ -154,11 +154,12 @@ app.get('/whois-ip', async (req, res) => {
   }
 });
 
-/* 🔍 Debiteur zoeken — nummer, naam én adres
-   LET OP:
-   - Pas de layoutnaam aan als jouw layout anders heet dan "Debiteuren"
-   - Pas de veldnamen aan naar jouw echte FileMaker-veldnamen:
-     Debiteurnummer, Bedrijfsnaam, Factuuradres_straat, Factuuradres_postcode, Factuuradres_plaats
+/* 🔍 Debiteur zoeken
+   Stap 1: zoeken op debiteurNummer + debiteurNaam (veilig; werkt al)
+   Stap 2: als er GEEN resultaten zijn, extra poging op adres-velden
+           (debiteur_ADRESSEN::Adres / Plaats / Postcode)
+
+   Layout: Debiteur_Rest  (zoals je eerder gebruikte)
 */
 app.get('/debiteur/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
@@ -168,88 +169,103 @@ app.get('/debiteur/search', async (req, res) => {
     return res.status(400).json({ error: 'q (search term) is required' });
   }
 
-  if (q.length < 2) {
-    return res.status(400).json({ error: 'query too short' });
-  }
-
   const isNumeric = /^[0-9]+$/.test(q);
   const wildcard = `*${q}*`;
-
-  // Bouw OR-query voor FileMaker
-  const fmQuery = [];
-
-  // 1) Als het nummer is → zoeken op Debiteurnummer (met wildcard)
-  if (isNumeric) {
-    fmQuery.push({ Debiteurnummer: wildcard });
-  }
-
-  // 2) Altijd zoeken op bedrijfsnaam
-  fmQuery.push({ Bedrijfsnaam: wildcard });
-
-  // 3) Adres / postcode / plaats
-  fmQuery.push(
-    { Factuuradres_straat: wildcard },
-    { Factuuradres_postcode: wildcard },
-    { Factuuradres_plaats: wildcard }
-  );
 
   try {
     const token = await getToken();
 
-    const { status, json } = await jsonFetch(
-      // 👉 PAS "Debiteuren" aan naar jouw echte layoutnaam
-      `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Debiteuren/_find`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          query: fmQuery,
-          limit: 50
-        })
-      }
-    );
+    // ---------- 1) BASIS-QUERY: nummer + naam ----------
+    const baseQuery = [];
 
-    const code = json?.messages?.[0]?.code;
-
-    // Geen matches → FileMaker geeft meestal code 401 terug
-    if (status === 200 && code === '401') {
-      return res.json({ error: 'no matches' });
+    // exact nummer
+    if (isNumeric) {
+      baseQuery.push({ debiteurNummer: q });
     }
 
-    if (status !== 200 || code !== '0') {
-      console.error('FileMaker find error:', status, JSON.stringify(json));
-      return res.status(502).json({
-        error: 'FileMaker response error',
+    // naam bevat q
+    baseQuery.push({ debiteurNaam: wildcard });
+
+    const callFind = async (query) =>
+      jsonFetch(
+        `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Debiteur_Rest/_find`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            query,
+            limit: 50
+          })
+        }
+      );
+
+    // Eerst zoeken op nummer/naam
+    let { status, json } = await callFind(baseQuery);
+    let fmCode = json?.messages?.[0]?.code;
+
+    if (status === 200 && fmCode === '0') {
+      const records = json?.response?.data || [];
+      const mapped = records.map((rec) => ({
+        recordId: rec.recordId,
+        debiteurNummer: rec.fieldData.debiteurNummer,
+        debiteurNaam: rec.fieldData.debiteurNaam,
+        telefoon: rec.fieldData.algTelefoon,
+        email: rec.fieldData.algEmail
+      }));
+      return res.json(mapped);
+    }
+
+    // Als er GEEN records zijn (401), proberen we adres-zoek
+    if (!(status === 200 && fmCode === '401')) {
+      // andere FM-error (bijv. 102 veld bestaat niet, 952 auth, etc.)
+      console.error(
+        'FileMaker error in baseQuery:',
         status,
-        fmCode: code,
-        fmMessages: json?.messages
-      });
+        JSON.stringify(json)
+      );
+      return res.status(502).json({ error: 'no matches' });
     }
 
-    const rows = json?.response?.data || [];
+    // ---------- 2) TWEEDE POGING: alleen adres-velden ----------
+    // LET OP: deze veldnamen / TO-naam moeten precies zo in FileMaker staan,
+    // anders geeft FileMaker error 102 (unknown field)
+    const addressQuery = [
+      { 'debiteur_ADRESSEN::Adres': wildcard },
+      { 'debiteur_ADRESSEN::Plaats': wildcard },
+      { 'debiteur_ADRESSEN::Postcode': wildcard }
+    ];
 
-    if (!rows.length) {
+    const second = await callFind(addressQuery);
+    status = second.status;
+    json = second.json;
+    fmCode = json?.messages?.[0]?.code;
+
+    if (status === 200 && fmCode === '0') {
+      const records = json?.response?.data || [];
+      const mapped = records.map((rec) => ({
+        recordId: rec.recordId,
+        debiteurNummer: rec.fieldData.debiteurNummer,
+        debiteurNaam: rec.fieldData.debiteurNaam,
+        telefoon: rec.fieldData.algTelefoon,
+        email: rec.fieldData.algEmail
+      }));
+      return res.json(mapped);
+    }
+
+    if (status === 200 && fmCode === '401') {
+      // ook op adres niets gevonden
       return res.json({ error: 'no matches' });
     }
 
-    const results = rows.map((r) => {
-      const f = r.fieldData || {};
-      return {
-        recordId: r.recordId,
-        modId: r.modId,
-        debiteurnummer: f.Debiteurnummer,
-        bedrijfsnaam: f.Bedrijfsnaam,
-        straat: f.Factuuradres_straat,
-        postcode: f.Factuuradres_postcode,
-        plaats: f.Factuuradres_plaats
-      };
-    });
-
-    // Zelfde patroon als je gewend was: direct array teruggeven
-    return res.json(results);
+    console.error(
+      'FileMaker error in addressQuery:',
+      status,
+      JSON.stringify(json)
+    );
+    return res.json({ error: 'no matches' });
   } catch (err) {
     console.error('Error in /debiteur/search:', err);
     return res.status(500).json({ error: String(err.message || err) });
