@@ -7,7 +7,6 @@ import { RateLimiterMemory } from 'rate-limiter-flexible';
 import { request as ureq, fetch } from 'undici';
 
 // ⚠️ Tijdelijke fix: accepteer self-signed / verlopen certificaat van FileMaker
-// Zolang de Daxis-server geen geldig SSL-certificaat heeft.
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const {
@@ -97,7 +96,6 @@ function okAuth(req) {
 }
 
 // ---------- ROUTES ----------
-
 app.get('/health', (_, res) => res.type('text/plain').send('OK'));
 
 /* 🧪 TEST ROUTE — check outbound connectivity */
@@ -108,17 +106,14 @@ app.get('/test', async (req, res) => {
     res
       .status(200)
       .send(
-        `✅ Connected to Google!<br>Status: ${response.status}<br><pre>${html.substring(
-          0,
-          300
-        )}...</pre>`
+        `✅ Connected to Google!<br>Status: ${response.status}<br><pre>${html.substring(0,300)}...</pre>`
       );
   } catch (err) {
     res.status(500).send(`❌ Connection failed: ${err.message}`);
   }
 });
 
-/* 🌐 GET public IP via een externe service */
+/* 🌐 GET public IP */
 app.get('/whois-ip', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
@@ -130,6 +125,7 @@ app.get('/whois-ip', async (req, res) => {
     ];
 
     let ip = null;
+
     for (const url of endpoints) {
       try {
         const r = await fetch(url);
@@ -137,28 +133,18 @@ app.get('/whois-ip', async (req, res) => {
         const text = await r.text();
         try {
           const j = JSON.parse(text);
-          if (j.ip) {
-            ip = j.ip;
-            break;
-          }
-          if (j.ip_addr) {
-            ip = j.ip_addr;
-            break;
-          }
-          if (j.ip_address) {
-            ip = j.ip_address;
+          if (j.ip || j.ip_addr || j.ip_address) {
+            ip = j.ip || j.ip_addr || j.ip_address;
             break;
           }
         } catch {
           const cand = text.trim();
-          if (cand && cand.match(/^\d{1,3}(\.\d{1,3}){3}$/)) {
+          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand)) {
             ip = cand;
             break;
           }
         }
-      } catch {
-        // probeer volgende endpoint
-      }
+      } catch {}
     }
 
     if (!ip) return res.status(502).json({ error: 'could not determine public IP' });
@@ -168,13 +154,72 @@ app.get('/whois-ip', async (req, res) => {
   }
 });
 
-// ---------- HOOFDENDPOINT VOOR FILEMAKER ----------
+/* 🔍 Debiteur zoeken — nummer of naam */
+app.get('/debiteur/search', async (req, res) => {
+  const qRaw = (req.query.q || '').toString();
+  const q = qRaw.trim();
+
+  if (!q) {
+    return res.status(400).json({ error: 'q (search term) is required' });
+  }
+
+  try {
+    const token = await getToken();
+
+    const fmQuery = [];
+
+    // zoeken op nummer (exact)
+    if (/^\d+$/.test(q)) {
+      fmQuery.push({ debiteurNummer: q });
+    }
+
+    // zoeken op naam (contains)
+    fmQuery.push({ debiteurNaam: `*${q}*` });
+
+    const { status, json } = await jsonFetch(
+      `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Debiteur_Rest/_find`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          query: fmQuery,
+          limit: 10
+        })
+      }
+    );
+
+    if (status !== 200 || json?.messages?.[0]?.code !== '0') {
+      return res.status(404).json({ error: 'no matches' });
+    }
+
+    const records = json?.response?.data || [];
+    const result = records.map((rec) => {
+      const f = rec.fieldData;
+      return {
+        recordId: rec.recordId,
+        debiteurNummer: f.debiteurNummer,
+        debiteurNaam: f.debiteurNaam,
+        telefoon: f.algTelefoon,
+        email: f.algEmail
+      };
+    });
+
+    return res.json(result);
+  } catch (err) {
+    console.error('Error in /debiteur/search:', err);
+    return res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+// ---------- HOOFDENDPOINT /fm/request ----------
 app.post('/fm/request', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
-    let { method, path, body, action, layout, recordId, fieldData } =
-      req.body || {};
+    let { method, path, body, action, layout, recordId, fieldData } = req.body || {};
 
     if (action === 'getLayouts') {
       method = 'GET';
@@ -182,13 +227,13 @@ app.post('/fm/request', async (req, res) => {
     }
     if (action === 'getRecord') {
       if (!layout || !recordId)
-        return res.status(400).json({ error: 'layout/recordId' });
+        return res.status(400).json({ error: 'layout/recordId required' });
       method = 'GET';
       path = `/layouts/${layout}/records/${recordId}`;
     }
     if (action === 'createRecord') {
       if (!layout || !fieldData)
-        return res.status(400).json({ error: 'layout/fieldData' });
+        return res.status(400).json({ error: 'layout/fieldData required' });
       method = 'POST';
       path = `/layouts/${layout}/records`;
       body = { fieldData };
@@ -197,12 +242,11 @@ app.post('/fm/request', async (req, res) => {
     if (!method || !path)
       return res.status(400).json({ error: 'method/path required' });
     if (!path.startsWith('/layouts'))
-      return res
-        .status(400)
-        .json({ error: 'path not allowed (must start with /layouts)' });
+      return res.status(400).json({ error: 'path must start with /layouts' });
 
     const token = await getToken();
-    const call = async (tok) =>
+
+    const callFM = async (tok) =>
       jsonFetch(`${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}${path}`, {
         method,
         headers: {
@@ -212,11 +256,12 @@ app.post('/fm/request', async (req, res) => {
         body: method === 'GET' ? undefined : JSON.stringify(body || {})
       });
 
-    let r = await call(token);
+    let r = await callFM(token);
     if (r.status === 401) {
       cachedToken = null;
-      r = await call(await getToken());
+      r = await callFM(await getToken());
     }
+
     res.status(r.status).json(r.json);
   } catch (e) {
     console.error('Error in /fm/request:', e);
