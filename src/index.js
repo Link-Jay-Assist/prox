@@ -29,7 +29,14 @@ const app = express();
 app.disable('x-powered-by');
 app.use(helmet());
 app.use(express.json({ limit: '10mb' }));
-app.use(cors({ origin: ALLOW_ORIGIN ? [ALLOW_ORIGIN] : true }));
+
+// ⭐⭐ CORS FIX — meerdere origins toegestaan
+app.use(
+  cors({
+    origin: ALLOW_ORIGIN ? ALLOW_ORIGIN.split(',') : true
+  })
+);
+
 app.use(morgan('tiny'));
 
 const limiter = new RateLimiterMemory({ points: 60, duration: 60 });
@@ -49,13 +56,12 @@ let tokenExp = 0;
 async function jsonFetch(url, opts = {}) {
   const r = await ureq(url, opts);
   const t = await r.body.text();
-  let j;
+
   try {
-    j = JSON.parse(t);
+    return { status: r.statusCode, json: JSON.parse(t) };
   } catch {
-    j = { raw: t };
+    return { status: r.statusCode, json: { raw: t } };
   }
-  return { status: r.statusCode, json: j };
 }
 
 // ---------- FILEMAKER TOKEN OPHALEN ----------
@@ -64,6 +70,7 @@ async function getToken() {
   if (cachedToken && now < tokenExp) return cachedToken;
 
   const basic = Buffer.from(`${FM_USER}:${FM_PASS}`).toString('base64');
+
   const { status, json } = await jsonFetch(
     `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/sessions`,
     {
@@ -103,13 +110,11 @@ app.get('/test', async (req, res) => {
   try {
     const response = await fetch('https://www.google.com');
     const html = await response.text();
-    res
-      .status(200)
-      .send(
-        `✅ Connected to Google!<br>Status: ${response.status}<br><pre>${html.substring(0,300)}...</pre>`
-      );
+    res.status(200).send(
+      `Connected!<br>Status: ${response.status}<br><pre>${html.substring(0, 300)}...</pre>`
+    );
   } catch (err) {
-    res.status(500).send(`❌ Connection failed: ${err.message}`);
+    res.status(500).send(`Connection failed: ${err.message}`);
   }
 });
 
@@ -124,8 +129,6 @@ app.get('/whois-ip', async (req, res) => {
       'https://checkip.amazonaws.com/'
     ];
 
-    let ip = null;
-
     for (const url of endpoints) {
       try {
         const r = await fetch(url);
@@ -133,24 +136,18 @@ app.get('/whois-ip', async (req, res) => {
         const text = await r.text();
         try {
           const j = JSON.parse(text);
-          if (j.ip || j.ip_addr || j.ip_address) {
-            ip = j.ip || j.ip_addr || j.ip_address;
-            break;
-          }
+          const ip = j.ip || j.ip_addr || j.ip_address;
+          if (ip) return res.json({ ip });
         } catch {
           const cand = text.trim();
-          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand)) {
-            ip = cand;
-            break;
-          }
+          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand)) return res.json({ ip: cand });
         }
       } catch {}
     }
 
-    if (!ip) return res.status(502).json({ error: 'could not determine public IP' });
-    return res.status(200).json({ ip });
+    res.status(502).json({ error: 'could not determine IP' });
   } catch (err) {
-    return res.status(500).json({ error: String(err.message || err) });
+    res.status(500).json({ error: String(err.message || err) });
   }
 });
 
@@ -168,13 +165,8 @@ app.get('/debiteur/search', async (req, res) => {
 
     const fmQuery = [];
 
-    // zoeken op nummer (exact)
-    if (/^\d+$/.test(q)) {
-      fmQuery.push({ debiteurNummer: q });
-    }
-
-    // zoeken op naam (contains)
-    fmQuery.push({ debiteurNaam: `*${q}*` });
+    if (/^\d+$/.test(q)) fmQuery.push({ debiteurNummer: q }); // exact nummer
+    fmQuery.push({ debiteurNaam: `*${q}*` }); // contains zoekopdracht
 
     const { status, json } = await jsonFetch(
       `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Debiteur_Rest/_find`,
@@ -196,18 +188,16 @@ app.get('/debiteur/search', async (req, res) => {
     }
 
     const records = json?.response?.data || [];
-    const result = records.map((rec) => {
-      const f = rec.fieldData;
-      return {
-        recordId: rec.recordId,
-        debiteurNummer: f.debiteurNummer,
-        debiteurNaam: f.debiteurNaam,
-        telefoon: f.algTelefoon,
-        email: f.algEmail
-      };
-    });
 
-    return res.json(result);
+    return res.json(
+      records.map((rec) => ({
+        recordId: rec.recordId,
+        debiteurNummer: rec.fieldData.debiteurNummer,
+        debiteurNaam: rec.fieldData.debiteurNaam,
+        telefoon: rec.fieldData.algTelefoon,
+        email: rec.fieldData.algEmail
+      }))
+    );
   } catch (err) {
     console.error('Error in /debiteur/search:', err);
     return res.status(500).json({ error: String(err.message || err) });
@@ -232,8 +222,6 @@ app.post('/fm/request', async (req, res) => {
       path = `/layouts/${layout}/records/${recordId}`;
     }
     if (action === 'createRecord') {
-      if (!layout || !fieldData)
-        return res.status(400).json({ error: 'layout/fieldData required' });
       method = 'POST';
       path = `/layouts/${layout}/records`;
       body = { fieldData };
@@ -241,6 +229,7 @@ app.post('/fm/request', async (req, res) => {
 
     if (!method || !path)
       return res.status(400).json({ error: 'method/path required' });
+
     if (!path.startsWith('/layouts'))
       return res.status(400).json({ error: 'path must start with /layouts' });
 
