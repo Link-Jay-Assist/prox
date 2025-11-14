@@ -30,7 +30,7 @@ app.disable('x-powered-by');
 app.use(helmet());
 app.use(express.json({ limit: '10mb' }));
 
-// ⭐⭐ CORS FIX — meerdere origins toegestaan
+// ⭐ CORS – meerdere origins via komma-gescheiden lijst in ALLOW_ORIGIN
 app.use(
   cors({
     origin: ALLOW_ORIGIN ? ALLOW_ORIGIN.split(',') : true
@@ -111,7 +111,10 @@ app.get('/test', async (req, res) => {
     const response = await fetch('https://www.google.com');
     const html = await response.text();
     res.status(200).send(
-      `Connected!<br>Status: ${response.status}<br><pre>${html.substring(0, 300)}...</pre>`
+      `Connected!<br>Status: ${response.status}<br><pre>${html.substring(
+        0,
+        300
+      )}...</pre>`
     );
   } catch (err) {
     res.status(500).send(`Connection failed: ${err.message}`);
@@ -151,7 +154,7 @@ app.get('/whois-ip', async (req, res) => {
   }
 });
 
-/* 🔍 Debiteur zoeken — nummer of naam */
+/* 🔍 Debiteur zoeken — nummer, naam én adres */
 app.get('/debiteur/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
   const q = qRaw.trim();
@@ -165,8 +168,20 @@ app.get('/debiteur/search', async (req, res) => {
 
     const fmQuery = [];
 
-    if (/^\d+$/.test(q)) fmQuery.push({ debiteurNummer: q }); // exact nummer
-    fmQuery.push({ debiteurNaam: `*${q}*` }); // contains zoekopdracht
+    // 1) zoeken op nummer (exact)
+    if (/^\d+$/.test(q)) {
+      fmQuery.push({ debiteurNummer: q });
+    }
+
+    // 2) zoeken op naam (contains)
+    fmQuery.push({ debiteurNaam: `*${q}*` });
+
+    // 3) zoeken op adres — vervang veldnamen indien nodig
+    fmQuery.push(
+      { 'debiteur_ADRESSEN::Adres': `*${q}*` },
+      { 'debiteur_ADRESSEN::Plaats': `*${q}*` },
+      { 'debiteur_ADRESSEN::Postcode': `*${q}*` }
+    );
 
     const { status, json } = await jsonFetch(
       `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Debiteur_Rest/_find`,
@@ -196,6 +211,8 @@ app.get('/debiteur/search', async (req, res) => {
         debiteurNaam: rec.fieldData.debiteurNaam,
         telefoon: rec.fieldData.algTelefoon,
         email: rec.fieldData.algEmail
+        // als Daxis straks adresvelden op de layout zet,
+        // kun je die hier extra mappen
       }))
     );
   } catch (err) {
@@ -209,7 +226,8 @@ app.post('/fm/request', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
-    let { method, path, body, action, layout, recordId, fieldData } = req.body || {};
+    let { method, path, body, action, layout, recordId, fieldData } =
+      req.body || {};
 
     if (action === 'getLayouts') {
       method = 'GET';
