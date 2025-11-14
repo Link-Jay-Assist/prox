@@ -154,7 +154,12 @@ app.get('/whois-ip', async (req, res) => {
   }
 });
 
-/* 🔍 Debiteur zoeken — nummer, naam én adres */
+/* 🔍 Debiteur zoeken — nummer, naam én adres
+   LET OP:
+   - Pas de layoutnaam aan als jouw layout anders heet dan "Debiteuren"
+   - Pas de veldnamen aan naar jouw echte FileMaker-veldnamen:
+     Debiteurnummer, Bedrijfsnaam, Factuuradres_straat, Factuuradres_postcode, Factuuradres_plaats
+*/
 app.get('/debiteur/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
   const q = qRaw.trim();
@@ -163,28 +168,37 @@ app.get('/debiteur/search', async (req, res) => {
     return res.status(400).json({ error: 'q (search term) is required' });
   }
 
+  if (q.length < 2) {
+    return res.status(400).json({ error: 'query too short' });
+  }
+
+  const isNumeric = /^[0-9]+$/.test(q);
+  const wildcard = `*${q}*`;
+
+  // Bouw OR-query voor FileMaker
+  const fmQuery = [];
+
+  // 1) Als het nummer is → zoeken op Debiteurnummer (met wildcard)
+  if (isNumeric) {
+    fmQuery.push({ Debiteurnummer: wildcard });
+  }
+
+  // 2) Altijd zoeken op bedrijfsnaam
+  fmQuery.push({ Bedrijfsnaam: wildcard });
+
+  // 3) Adres / postcode / plaats
+  fmQuery.push(
+    { Factuuradres_straat: wildcard },
+    { Factuuradres_postcode: wildcard },
+    { Factuuradres_plaats: wildcard }
+  );
+
   try {
     const token = await getToken();
 
-    const fmQuery = [];
-
-    // 1) zoeken op nummer (exact)
-    if (/^\d+$/.test(q)) {
-      fmQuery.push({ debiteurNummer: q });
-    }
-
-    // 2) zoeken op naam (contains)
-    fmQuery.push({ debiteurNaam: `*${q}*` });
-
-    // 3) zoeken op adres — vervang veldnamen indien nodig
-    fmQuery.push(
-      { 'debiteur_ADRESSEN::Adres': `*${q}*` },
-      { 'debiteur_ADRESSEN::Plaats': `*${q}*` },
-      { 'debiteur_ADRESSEN::Postcode': `*${q}*` }
-    );
-
     const { status, json } = await jsonFetch(
-      `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Debiteur_Rest/_find`,
+      // 👉 PAS "Debiteuren" aan naar jouw echte layoutnaam
+      `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Debiteuren/_find`,
       {
         method: 'POST',
         headers: {
@@ -193,28 +207,49 @@ app.get('/debiteur/search', async (req, res) => {
         },
         body: JSON.stringify({
           query: fmQuery,
-          limit: 10
+          limit: 50
         })
       }
     );
 
-    if (status !== 200 || json?.messages?.[0]?.code !== '0') {
-      return res.status(404).json({ error: 'no matches' });
+    const code = json?.messages?.[0]?.code;
+
+    // Geen matches → FileMaker geeft meestal code 401 terug
+    if (status === 200 && code === '401') {
+      return res.json({ error: 'no matches' });
     }
 
-    const records = json?.response?.data || [];
+    if (status !== 200 || code !== '0') {
+      console.error('FileMaker find error:', status, JSON.stringify(json));
+      return res.status(502).json({
+        error: 'FileMaker response error',
+        status,
+        fmCode: code,
+        fmMessages: json?.messages
+      });
+    }
 
-    return res.json(
-      records.map((rec) => ({
-        recordId: rec.recordId,
-        debiteurNummer: rec.fieldData.debiteurNummer,
-        debiteurNaam: rec.fieldData.debiteurNaam,
-        telefoon: rec.fieldData.algTelefoon,
-        email: rec.fieldData.algEmail
-        // als Daxis straks adresvelden op de layout zet,
-        // kun je die hier extra mappen
-      }))
-    );
+    const rows = json?.response?.data || [];
+
+    if (!rows.length) {
+      return res.json({ error: 'no matches' });
+    }
+
+    const results = rows.map((r) => {
+      const f = r.fieldData || {};
+      return {
+        recordId: r.recordId,
+        modId: r.modId,
+        debiteurnummer: f.Debiteurnummer,
+        bedrijfsnaam: f.Bedrijfsnaam,
+        straat: f.Factuuradres_straat,
+        postcode: f.Factuuradres_postcode,
+        plaats: f.Factuuradres_plaats
+      };
+    });
+
+    // Zelfde patroon als je gewend was: direct array teruggeven
+    return res.json(results);
   } catch (err) {
     console.error('Error in /debiteur/search:', err);
     return res.status(500).json({ error: String(err.message || err) });
