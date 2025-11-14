@@ -6,6 +6,10 @@ import morgan from 'morgan';
 import { RateLimiterMemory } from 'rate-limiter-flexible';
 import { request as ureq, fetch } from 'undici';
 
+// ⚠️ Tijdelijke fix: accepteer self-signed / verlopen certificaat van FileMaker
+// Zolang de Daxis-server geen geldig SSL-certificaat heeft.
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 const {
   PORT = 3000,
   API_SECRET,
@@ -14,8 +18,7 @@ const {
   FM_USER,
   FM_PASS,
   FM_TOKEN_TTL_MIN = 12,
-  ALLOW_ORIGIN,
-  FM_INSECURE_TLS // "true" zolang Daxis self-signed / verlopen cert gebruikt
+  ALLOW_ORIGIN
 } = process.env;
 
 if (!API_SECRET || !FM_HOST || !FM_DB || !FM_USER || !FM_PASS) {
@@ -43,21 +46,9 @@ app.use(async (req, res, next) => {
 let cachedToken = null;
 let tokenExp = 0;
 
-// ---------- GENERIEKE FETCH HELPER (MET TLS-EXCEPTIE VOOR FILEMAKER) ----------
+// ---------- GENERIEKE FETCH HELPER ----------
 async function jsonFetch(url, opts = {}) {
-  const isFM = url.startsWith(FM_HOST);
-  const useInsecureTls = isFM && FM_INSECURE_TLS === 'true';
-
-  const finalOpts = {
-    ...opts,
-    ...(useInsecureTls ? { tls: { rejectUnauthorized: false } } : {})
-  };
-
-  if (useInsecureTls) {
-    console.warn('[FM] Using insecure TLS (rejectUnauthorized=false) for', url);
-  }
-
-  const r = await ureq(url, finalOpts);
+  const r = await ureq(url, opts);
   const t = await r.body.text();
   let j;
   try {
@@ -127,7 +118,7 @@ app.get('/test', async (req, res) => {
   }
 });
 
-/* 🌐 GET public IP via a reliable external service */
+/* 🌐 GET public IP via een externe service */
 app.get('/whois-ip', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
@@ -166,7 +157,7 @@ app.get('/whois-ip', async (req, res) => {
           }
         }
       } catch {
-        // ignore and try next endpoint
+        // probeer volgende endpoint
       }
     }
 
