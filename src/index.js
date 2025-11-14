@@ -14,7 +14,8 @@ const {
   FM_USER,
   FM_PASS,
   FM_TOKEN_TTL_MIN = 12,
-  ALLOW_ORIGIN
+  ALLOW_ORIGIN,
+  FM_INSECURE_TLS // "true" zolang Daxis self-signed / verlopen cert gebruikt
 } = process.env;
 
 if (!API_SECRET || !FM_HOST || !FM_DB || !FM_USER || !FM_PASS) {
@@ -42,8 +43,21 @@ app.use(async (req, res, next) => {
 let cachedToken = null;
 let tokenExp = 0;
 
+// ---------- GENERIEKE FETCH HELPER (MET TLS-EXCEPTIE VOOR FILEMAKER) ----------
 async function jsonFetch(url, opts = {}) {
-  const r = await ureq(url, opts);
+  const isFM = url.startsWith(FM_HOST);
+  const useInsecureTls = isFM && FM_INSECURE_TLS === 'true';
+
+  const finalOpts = {
+    ...opts,
+    ...(useInsecureTls ? { tls: { rejectUnauthorized: false } } : {})
+  };
+
+  if (useInsecureTls) {
+    console.warn('[FM] Using insecure TLS (rejectUnauthorized=false) for', url);
+  }
+
+  const r = await ureq(url, finalOpts);
   const t = await r.body.text();
   let j;
   try {
@@ -54,9 +68,11 @@ async function jsonFetch(url, opts = {}) {
   return { status: r.statusCode, json: j };
 }
 
+// ---------- FILEMAKER TOKEN OPHALEN ----------
 async function getToken() {
   const now = Date.now();
   if (cachedToken && now < tokenExp) return cachedToken;
+
   const basic = Buffer.from(`${FM_USER}:${FM_PASS}`).toString('base64');
   const { status, json } = await jsonFetch(
     `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/sessions`,
@@ -69,13 +85,17 @@ async function getToken() {
       body: '{}'
     }
   );
-  if (status !== 200 || !json?.response?.token)
+
+  if (status !== 200 || !json?.response?.token) {
     throw new Error(`FM login failed: ${status} ${JSON.stringify(json)}`);
+  }
+
   cachedToken = json.response.token;
   tokenExp = now + Number(FM_TOKEN_TTL_MIN) * 60 * 1000;
   return cachedToken;
 }
 
+// ---------- AUTH HELPER ----------
 function okAuth(req) {
   const s = req.header('X-Webhook-Secret');
   const b = req.header('Authorization');
@@ -84,6 +104,8 @@ function okAuth(req) {
     (b && b.startsWith('Bearer ') && b.slice(7) === API_SECRET)
   );
 }
+
+// ---------- ROUTES ----------
 
 app.get('/health', (_, res) => res.type('text/plain').send('OK'));
 
@@ -95,7 +117,10 @@ app.get('/test', async (req, res) => {
     res
       .status(200)
       .send(
-        `✅ Connected to Google!<br>Status: ${response.status}<br><pre>${html.substring(0, 300)}...</pre>`
+        `✅ Connected to Google!<br>Status: ${response.status}<br><pre>${html.substring(
+          0,
+          300
+        )}...</pre>`
       );
   } catch (err) {
     res.status(500).send(`❌ Connection failed: ${err.message}`);
@@ -105,14 +130,12 @@ app.get('/test', async (req, res) => {
 /* 🌐 GET public IP via a reliable external service */
 app.get('/whois-ip', async (req, res) => {
   try {
-    // protect route with your existing API secret check
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
-    // try a couple of reliable "what is my IP" endpoints (fallback)
     const endpoints = [
-      'https://api.ipify.org?format=json',        // returns { ip: "x.x.x.x" }
-      'https://ifconfig.me/all.json',             // returns JSON including "ip_addr"
-      'https://checkip.amazonaws.com/'            // returns plain "x.x.x.x\n"
+      'https://api.ipify.org?format=json',
+      'https://ifconfig.me/all.json',
+      'https://checkip.amazonaws.com/'
     ];
 
     let ip = null;
@@ -121,18 +144,26 @@ app.get('/whois-ip', async (req, res) => {
         const r = await fetch(url);
         if (!r.ok) continue;
         const text = await r.text();
-        // try parse JSON first
         try {
           const j = JSON.parse(text);
-          // api.ipify => { ip: "..." }
-          if (j.ip) { ip = j.ip; break; }
-          // ifconfig.me => ip_addr or ip_address
-          if (j.ip_addr) { ip = j.ip_addr; break; }
-          if (j.ip_address) { ip = j.ip_address; break; }
+          if (j.ip) {
+            ip = j.ip;
+            break;
+          }
+          if (j.ip_addr) {
+            ip = j.ip_addr;
+            break;
+          }
+          if (j.ip_address) {
+            ip = j.ip_address;
+            break;
+          }
         } catch {
-          // not JSON — maybe plain text (checkip.amazonaws.com)
           const cand = text.trim();
-          if (cand && cand.match(/^\d{1,3}(\.\d{1,3}){3}$/)) { ip = cand; break; }
+          if (cand && cand.match(/^\d{1,3}(\.\d{1,3}){3}$/)) {
+            ip = cand;
+            break;
+          }
         }
       } catch {
         // ignore and try next endpoint
@@ -146,9 +177,11 @@ app.get('/whois-ip', async (req, res) => {
   }
 });
 
+// ---------- HOOFDENDPOINT VOOR FILEMAKER ----------
 app.post('/fm/request', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
+
     let { method, path, body, action, layout, recordId, fieldData } =
       req.body || {};
 
@@ -173,7 +206,9 @@ app.post('/fm/request', async (req, res) => {
     if (!method || !path)
       return res.status(400).json({ error: 'method/path required' });
     if (!path.startsWith('/layouts'))
-      return res.status(400).json({ error: 'path not allowed' });
+      return res
+        .status(400)
+        .json({ error: 'path not allowed (must start with /layouts)' });
 
     const token = await getToken();
     const call = async (tok) =>
@@ -193,6 +228,7 @@ app.post('/fm/request', async (req, res) => {
     }
     res.status(r.status).json(r.json);
   } catch (e) {
+    console.error('Error in /fm/request:', e);
     res.status(500).json({ error: String(e.message || e) });
   }
 });

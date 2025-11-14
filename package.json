@@ -4,8 +4,7 @@
   "type": "module",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "test-conn": "node src/testConnection.js"
+    "start": "node src/index.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
