@@ -272,6 +272,101 @@ app.get('/debiteur/search', async (req, res) => {
   }
 });
 
+/* 🔍 Servicebon zoeken (Servicebon_Rest)
+   Zoekt op:
+   - projectcode
+   - projectNaam
+   - PROJECT::debiteurNaam / debiteurNummer
+   - project_SERVICECONTRACTEN::contractCode / contractNummer
+   - project_SERVICECONTRACTEN::machine / machineType
+
+   Let op:
+   - Op dit moment krijg je in fieldData '<No Access>' totdat de FM-rechten
+     voor account 'restuser' op layout Servicebon_Rest goed staan.
+*/
+app.get('/servicebon/search', async (req, res) => {
+  const qRaw = (req.query.q || '').toString();
+  const q = qRaw.trim();
+
+  if (!q) {
+    return res.status(400).json({ error: 'q (search term) is required' });
+  }
+
+  const wildcard = `*${q}*`;
+
+  try {
+    const token = await getToken();
+
+    const fmQuery = [];
+
+    // Zo breed mogelijk zoeken op relevante velden
+    fmQuery.push(
+      { projectcode: wildcard },
+      { projectNaam: wildcard },
+      { 'PROJECT::debiteurNaam': wildcard },
+      { 'PROJECT::debiteurNummer': wildcard },
+      { 'project_SERVICECONTRACTEN::contractCode': wildcard },
+      { 'project_SERVICECONTRACTEN::contractNummer': wildcard },
+      { 'project_SERVICECONTRACTEN::contractType': wildcard },
+      { 'project_SERVICECONTRACTEN::machine': wildcard },
+      { 'project_SERVICECONTRACTEN::machineType': wildcard }
+    );
+
+    const { status, json } = await jsonFetch(
+      `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Servicebon_Rest/_find`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          query: fmQuery,
+          limit: 50
+        })
+      }
+    );
+
+    const fmCode = json?.messages?.[0]?.code;
+
+    if (status === 200 && fmCode === '0') {
+      const records = json?.response?.data || [];
+      const mapped = records.map((rec) => {
+        const f = rec.fieldData || {};
+        return {
+          recordId: rec.recordId,
+          projectcode: f.projectcode,
+          projectNaam: f.projectNaam,
+          debiteurNummer: f['PROJECT::debiteurNummer'],
+          debiteurNaam: f['PROJECT::debiteurNaam'],
+          debiteurTelefoon: f['project_DEBITEUR::algTelefoon'],
+          debiteurEmail: f['project_DEBITEUR::algEmail'],
+          contractCode: f['project_SERVICECONTRACTEN::contractCode'],
+          contractNummer: f['project_SERVICECONTRACTEN::contractNummer'],
+          contractType: f['project_SERVICECONTRACTEN::contractType'],
+          machine: f['project_SERVICECONTRACTEN::machine'],
+          machineType: f['project_SERVICECONTRACTEN::machineType']
+        };
+      });
+      return res.json(mapped);
+    }
+
+    if (status === 200 && fmCode === '401') {
+      return res.json({ error: 'no matches' });
+    }
+
+    console.error(
+      'FileMaker find error in /servicebon/search:',
+      status,
+      JSON.stringify(json)
+    );
+    return res.status(502).json({ error: 'FileMaker response error' });
+  } catch (err) {
+    console.error('Error in /servicebon/search:', err);
+    return res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
 // ---------- HOOFDENDPOINT /fm/request ----------
 app.post('/fm/request', async (req, res) => {
   try {
