@@ -154,13 +154,7 @@ app.get('/whois-ip', async (req, res) => {
   }
 });
 
-/* 🔍 Debiteur zoeken
-   Stap 1: zoeken op debiteurNummer + debiteurNaam (veilig; werkt al)
-   Stap 2: als er GEEN resultaten zijn, extra poging op adres-velden
-           (debiteur_ADRESSEN::Adres / Plaats / Postcode)
-
-   Layout: Debiteur_Rest  (zoals je eerder gebruikte)
-*/
+/* 🔍 Debiteur zoeken */
 app.get('/debiteur/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
   const q = qRaw.trim();
@@ -220,7 +214,6 @@ app.get('/debiteur/search', async (req, res) => {
 
     // Als er GEEN records zijn (401), proberen we adres-zoek
     if (!(status === 200 && fmCode === '401')) {
-      // andere FM-error (bijv. 102 veld bestaat niet, 952 auth, etc.)
       console.error(
         'FileMaker error in baseQuery:',
         status,
@@ -230,8 +223,6 @@ app.get('/debiteur/search', async (req, res) => {
     }
 
     // ---------- 2) TWEEDE POGING: alleen adres-velden ----------
-    // LET OP: deze veldnamen / TO-naam moeten precies zo in FileMaker staan,
-    // anders geeft FileMaker error 102 (unknown field)
     const addressQuery = [
       { 'debiteur_ADRESSEN::Adres': wildcard },
       { 'debiteur_ADRESSEN::Plaats': wildcard },
@@ -272,17 +263,15 @@ app.get('/debiteur/search', async (req, res) => {
   }
 });
 
-/* 🔍 Servicebon zoeken (Servicebon_Rest)
-   Zoekt op:
+/* 🔍 Servicebon zoeken (Servicebon_Rest) – simpele versie
+   Zoekt ALLEEN op:
    - projectcode
    - projectNaam
-   - PROJECT::debiteurNaam / debiteurNummer
-   - project_SERVICECONTRACTEN::contractCode / contractNummer
-   - project_SERVICECONTRACTEN::machine / machineType
 
-   Let op:
-   - Op dit moment krijg je in fieldData '<No Access>' totdat de FM-rechten
-     voor account 'restuser' op layout Servicebon_Rest goed staan.
+   Zodat we geen FileMaker-fouten krijgen door velden die niet bestaan
+   of geen toegang hebben. Zolang rechten nog niet zijn gefixt, zul je
+   hier waarschijnlijk wel weer '<No Access>' in fieldData zien, maar
+   de route zelf werkt dan wel.
 */
 app.get('/servicebon/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
@@ -297,20 +286,10 @@ app.get('/servicebon/search', async (req, res) => {
   try {
     const token = await getToken();
 
-    const fmQuery = [];
-
-    // Zo breed mogelijk zoeken op relevante velden
-    fmQuery.push(
+    const fmQuery = [
       { projectcode: wildcard },
-      { projectNaam: wildcard },
-      { 'PROJECT::debiteurNaam': wildcard },
-      { 'PROJECT::debiteurNummer': wildcard },
-      { 'project_SERVICECONTRACTEN::contractCode': wildcard },
-      { 'project_SERVICECONTRACTEN::contractNummer': wildcard },
-      { 'project_SERVICECONTRACTEN::contractType': wildcard },
-      { 'project_SERVICECONTRACTEN::machine': wildcard },
-      { 'project_SERVICECONTRACTEN::machineType': wildcard }
-    );
+      { projectNaam: wildcard }
+    ];
 
     const { status, json } = await jsonFetch(
       `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Servicebon_Rest/_find`,
@@ -336,16 +315,7 @@ app.get('/servicebon/search', async (req, res) => {
         return {
           recordId: rec.recordId,
           projectcode: f.projectcode,
-          projectNaam: f.projectNaam,
-          debiteurNummer: f['PROJECT::debiteurNummer'],
-          debiteurNaam: f['PROJECT::debiteurNaam'],
-          debiteurTelefoon: f['project_DEBITEUR::algTelefoon'],
-          debiteurEmail: f['project_DEBITEUR::algEmail'],
-          contractCode: f['project_SERVICECONTRACTEN::contractCode'],
-          contractNummer: f['project_SERVICECONTRACTEN::contractNummer'],
-          contractType: f['project_SERVICECONTRACTEN::contractType'],
-          machine: f['project_SERVICECONTRACTEN::machine'],
-          machineType: f['project_SERVICECONTRACTEN::machineType']
+          projectNaam: f.projectNaam
         };
       });
       return res.json(mapped);
@@ -360,7 +330,11 @@ app.get('/servicebon/search', async (req, res) => {
       status,
       JSON.stringify(json)
     );
-    return res.status(502).json({ error: 'FileMaker response error' });
+    return res.status(502).json({
+      error: 'FileMaker response error',
+      fmStatus: status,
+      fmMessages: json?.messages
+    });
   } catch (err) {
     console.error('Error in /servicebon/search:', err);
     return res.status(500).json({ error: String(err.message || err) });
