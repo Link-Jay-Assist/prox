@@ -263,15 +263,15 @@ app.get('/debiteur/search', async (req, res) => {
   }
 });
 
-/* 🔍 Servicebon zoeken (Servicebon_Rest) – simpele versie
-   Zoekt ALLEEN op:
+/* 🔍 Servicebon zoeken (Servicebon_Rest) – uitgebreide versie
+   Zoekt in:
    - projectcode
    - projectNaam
-
-   Zodat we geen FileMaker-fouten krijgen door velden die niet bestaan
-   of geen toegang hebben. Zolang rechten nog niet zijn gefixt, zul je
-   hier waarschijnlijk wel weer '<No Access>' in fieldData zien, maar
-   de route zelf werkt dan wel.
+   - PROJECT::debiteurNaam
+   - PROJECT::debiteurNummer
+   - project_SERVICECONTRACTEN::contractNummer
+   - project_SERVICECONTRACTEN::machine
+   - project_SERVICECONTRACTEN::machineType
 */
 app.get('/servicebon/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
@@ -288,7 +288,12 @@ app.get('/servicebon/search', async (req, res) => {
 
     const fmQuery = [
       { projectcode: wildcard },
-      { projectNaam: wildcard }
+      { projectNaam: wildcard },
+      { 'PROJECT::debiteurNaam': wildcard },
+      { 'PROJECT::debiteurNummer': wildcard },
+      { 'project_SERVICECONTRACTEN::contractNummer': wildcard },
+      { 'project_SERVICECONTRACTEN::machine': wildcard },
+      { 'project_SERVICECONTRACTEN::machineType': wildcard }
     ];
 
     const { status, json } = await jsonFetch(
@@ -315,7 +320,13 @@ app.get('/servicebon/search', async (req, res) => {
         return {
           recordId: rec.recordId,
           projectcode: f.projectcode,
-          projectNaam: f.projectNaam
+          projectNaam: f.projectNaam,
+          debiteurNummer: f['PROJECT::debiteurNummer'],
+          debiteurNaam: f['PROJECT::debiteurNaam'],
+          contractNummer: f['project_SERVICECONTRACTEN::contractNummer'],
+          contractCode: f['project_SERVICECONTRACTEN::contractCode'],
+          machineCode: f['project_SERVICECONTRACTEN::machine'],
+          machineType: f['project_SERVICECONTRACTEN::machineType']
         };
       });
       return res.json(mapped);
