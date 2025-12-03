@@ -272,6 +272,9 @@ app.get('/debiteur/search', async (req, res) => {
    - project_SERVICECONTRACTEN::contractNummer
    - project_SERVICECONTRACTEN::machine
    - project_SERVICECONTRACTEN::machineType
+   - servicenummer
+   - servicebonnummer
+   - project_SERVICENUMMER::omschrijvingKort (machine omschrijving)
 */
 app.get('/servicebon/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
@@ -293,7 +296,12 @@ app.get('/servicebon/search', async (req, res) => {
       { 'PROJECT::debiteurNummer': wildcard },
       { 'project_SERVICECONTRACTEN::contractNummer': wildcard },
       { 'project_SERVICECONTRACTEN::machine': wildcard },
-      { 'project_SERVICECONTRACTEN::machineType': wildcard }
+      { 'project_SERVICECONTRACTEN::machineType': wildcard },
+
+      // nieuwe zoekvelden:
+      { servicenummer: wildcard },
+      { servicebonnummer: wildcard },
+      { 'project_SERVICENUMMER::omschrijvingKort': wildcard }
     ];
 
     const { status, json } = await jsonFetch(
@@ -326,7 +334,14 @@ app.get('/servicebon/search', async (req, res) => {
           contractNummer: f['project_SERVICECONTRACTEN::contractNummer'],
           contractCode: f['project_SERVICECONTRACTEN::contractCode'],
           machineCode: f['project_SERVICECONTRACTEN::machine'],
-          machineType: f['project_SERVICECONTRACTEN::machineType']
+          machineType: f['project_SERVICECONTRACTEN::machineType'],
+
+          // nieuwe velden:
+          servicenummerId: f.id_servicenummer,
+          servicenummer: f.servicenummer,
+          servicebonnummer: f.servicebonnummer,
+          machineOmschrijving: f['project_SERVICENUMMER::omschrijvingKort'],
+          meldingsdatum: f.__createDate
         };
       });
       return res.json(mapped);
