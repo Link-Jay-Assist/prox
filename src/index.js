@@ -336,12 +336,16 @@ app.get('/servicebon/search', async (req, res) => {
           machineCode: f['project_SERVICECONTRACTEN::machine'],
           machineType: f['project_SERVICECONTRACTEN::machineType'],
 
-          // nieuwe velden:
+          // service / machine info:
           servicenummerId: f.id_servicenummer,
           servicenummer: f.servicenummer,
           servicebonnummer: f.servicebonnummer,
           machineOmschrijving: f['project_SERVICENUMMER::omschrijvingKort'],
-          meldingsdatum: f.__createDate
+          meldingsdatum: f.__createDate,
+
+          // ✅ contract / leverdatum info:
+          contractDatumStart: f['project_SERVICECONTRACTEN::datumStart'],
+          contractDatumEinde: f['project_SERVICECONTRACTEN::datumEinde']
         };
       });
       return res.json(mapped);
