@@ -263,19 +263,7 @@ app.get('/debiteur/search', async (req, res) => {
   }
 });
 
-/* 🔍 Servicebon zoeken (Servicebon_Rest) – uitgebreide versie
-   Zoekt in:
-   - projectcode
-   - projectNaam
-   - PROJECT::debiteurNaam
-   - PROJECT::debiteurNummer
-   - project_SERVICECONTRACTEN::contractNummer
-   - project_SERVICECONTRACTEN::machine
-   - project_SERVICECONTRACTEN::machineType
-   - servicenummer
-   - servicebonnummer
-   - project_SERVICENUMMER::omschrijvingKort (machine omschrijving)
-*/
+/* 🔍 Servicebon zoeken (Servicebon_Rest) – uitgebreide versie */
 app.get('/servicebon/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
   const q = qRaw.trim();
@@ -298,7 +286,10 @@ app.get('/servicebon/search', async (req, res) => {
       { 'project_SERVICECONTRACTEN::machine': wildcard },
       { 'project_SERVICECONTRACTEN::machineType': wildcard },
 
-      // nieuwe zoekvelden:
+      // ✅ nieuw: zoeken op adres string (straat/postcode/plaats zitten hierin)
+      { 'PROJECT::adresLabelBezoek': wildcard },
+
+      // bestaande zoekvelden:
       { servicenummer: wildcard },
       { servicebonnummer: wildcard },
       { 'project_SERVICENUMMER::omschrijvingKort': wildcard }
@@ -329,8 +320,13 @@ app.get('/servicebon/search', async (req, res) => {
           recordId: rec.recordId,
           projectcode: f.projectcode,
           projectNaam: f.projectNaam,
+
           debiteurNummer: f['PROJECT::debiteurNummer'],
           debiteurNaam: f['PROJECT::debiteurNaam'],
+
+          // ✅ nieuw: adres teruggeven
+          adresLabelBezoek: f['PROJECT::adresLabelBezoek'],
+
           contractNummer: f['project_SERVICECONTRACTEN::contractNummer'],
           contractCode: f['project_SERVICECONTRACTEN::contractCode'],
           machineCode: f['project_SERVICECONTRACTEN::machine'],
@@ -343,11 +339,12 @@ app.get('/servicebon/search', async (req, res) => {
           machineOmschrijving: f['project_SERVICENUMMER::omschrijvingKort'],
           meldingsdatum: f.__createDate,
 
-          // ✅ contract / leverdatum info:
+          // contract / leverdatum info:
           contractDatumStart: f['project_SERVICECONTRACTEN::datumStart'],
           contractDatumEinde: f['project_SERVICECONTRACTEN::datumEinde']
         };
       });
+
       return res.json(mapped);
     }
 
