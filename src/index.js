@@ -286,7 +286,7 @@ app.get('/servicebon/search', async (req, res) => {
       { 'project_SERVICECONTRACTEN::machine': wildcard },
       { 'project_SERVICECONTRACTEN::machineType': wildcard },
 
-      // ✅ nieuw: zoeken op adres string (straat/postcode/plaats zitten hierin)
+      // ✅ zoeken op adres string (straat/postcode/plaats zitten hierin)
       { 'PROJECT::adresLabelBezoek': wildcard },
 
       // bestaande zoekvelden:
@@ -324,7 +324,6 @@ app.get('/servicebon/search', async (req, res) => {
           debiteurNummer: f['PROJECT::debiteurNummer'],
           debiteurNaam: f['PROJECT::debiteurNaam'],
 
-          // ✅ nieuw: adres teruggeven
           adresLabelBezoek: f['PROJECT::adresLabelBezoek'],
 
           contractNummer: f['project_SERVICECONTRACTEN::contractNummer'],
@@ -332,14 +331,12 @@ app.get('/servicebon/search', async (req, res) => {
           machineCode: f['project_SERVICECONTRACTEN::machine'],
           machineType: f['project_SERVICECONTRACTEN::machineType'],
 
-          // service / machine info:
           servicenummerId: f.id_servicenummer,
           servicenummer: f.servicenummer,
           servicebonnummer: f.servicebonnummer,
           machineOmschrijving: f['project_SERVICENUMMER::omschrijvingKort'],
           meldingsdatum: f.__createDate,
 
-          // contract / leverdatum info:
           contractDatumStart: f['project_SERVICECONTRACTEN::datumStart'],
           contractDatumEinde: f['project_SERVICECONTRACTEN::datumEinde']
         };
@@ -364,6 +361,128 @@ app.get('/servicebon/search', async (req, res) => {
     });
   } catch (err) {
     console.error('Error in /servicebon/search:', err);
+    return res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+/* 🔍 Product zoeken (Product_rest)
+   Zoekt in:
+   - productNummerIntern
+   - productNummerLeverancier
+   - omschrijvingKortNL/EN/DE
+   - leverancierNaam
+   Optioneel:
+   - onlyStock=true  => product_VOORRAAD::aantal > 0
+   - category=Voorraad => productcategorie exact match
+   - limit=1..200
+*/
+app.get('/product/search', async (req, res) => {
+  const qRaw = (req.query.q || '').toString();
+  const q = qRaw.trim();
+
+  const onlyStock =
+    String(req.query.onlyStock || '').toLowerCase() === 'true' ||
+    String(req.query.onlyStock || '') === '1';
+
+  const category = (req.query.category || '').toString().trim(); // bijv. "Voorraad"
+
+  const limitReq = Number(req.query.limit || 50);
+  const limit = Number.isFinite(limitReq)
+    ? Math.min(200, Math.max(1, limitReq))
+    : 50;
+
+  if (!q) {
+    return res.status(400).json({ error: 'q (search term) is required' });
+  }
+
+  const wildcard = `*${q}*`;
+
+  try {
+    const token = await getToken();
+
+    // FileMaker _find: elk object in query-array is een OR, velden binnen object zijn AND.
+    // We bouwen OR-regels, en (optioneel) plakken we extra AND-filters erbij.
+    const baseOr = [
+      { productNummerIntern: wildcard },
+      { productNummerLeverancier: wildcard },
+      { omschrijvingKortNL: wildcard },
+      { omschrijvingKortEN: wildcard },
+      { omschrijvingKortDE: wildcard },
+      { leverancierNaam: wildcard }
+    ];
+
+    const fmQuery = baseOr.map((row) => {
+      const r = { ...row };
+      if (category) r.productcategorie = category;
+      if (onlyStock) r['product_VOORRAAD::aantal'] = '>0';
+      return r;
+    });
+
+    const { status, json } = await jsonFetch(
+      `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Product_rest/_find`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          query: fmQuery,
+          limit
+        })
+      }
+    );
+
+    const fmCode = json?.messages?.[0]?.code;
+
+    if (status === 200 && fmCode === '0') {
+      const records = json?.response?.data || [];
+      const mapped = records.map((rec) => {
+        const f = rec.fieldData || {};
+        return {
+          recordId: rec.recordId,
+
+          productNummerIntern: f.productNummerIntern,
+          productNummerLeverancier: f.productNummerLeverancier,
+
+          productcategorie: f.productcategorie,
+          productgroep: f.productgroep,
+
+          omschrijvingKortNL: f.omschrijvingKortNL,
+          omschrijvingKortEN: f.omschrijvingKortEN,
+          omschrijvingKortDE: f.omschrijvingKortDE,
+          omschrijvingLang: f.omschrijvingLang,
+
+          merk: f.merk,
+          locatiecode: f.locatiecode,
+          leverancierNaam: f.leverancierNaam,
+
+          voorraad: f['product_VOORRAAD::aantal'] ?? null,
+          voorraadRecordId: f['product_VOORRAAD::ID'] ?? null,
+          productId: f.ID ?? null,
+          voorraadProductId: f['product_VOORRAAD::id_product'] ?? null
+        };
+      });
+
+      return res.json(mapped);
+    }
+
+    if (status === 200 && fmCode === '401') {
+      return res.json({ error: 'no matches' });
+    }
+
+    console.error(
+      'FileMaker find error in /product/search:',
+      status,
+      JSON.stringify(json)
+    );
+    return res.status(502).json({
+      error: 'FileMaker response error',
+      fmStatus: status,
+      fmMessages: json?.messages
+    });
+  } catch (err) {
+    console.error('Error in /product/search:', err);
     return res.status(500).json({ error: String(err.message || err) });
   }
 });
