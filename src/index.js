@@ -143,7 +143,8 @@ app.get('/whois-ip', async (req, res) => {
           if (ip) return res.json({ ip });
         } catch {
           const cand = text.trim();
-          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand)) return res.json({ ip: cand });
+          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand))
+            return res.json({ ip: cand });
         }
       } catch {}
     }
@@ -289,6 +290,11 @@ app.get('/servicebon/search', async (req, res) => {
       // ✅ zoeken op adres string (straat/postcode/plaats zitten hierin)
       { 'PROJECT::adresLabelBezoek': wildcard },
 
+      // ✅ nieuw: ook kunnen zoeken op losse straat/huisnummer/toevoeging
+      { 'project_ADRESSEN~bezoek::straat': wildcard },
+      { 'project_ADRESSEN~bezoek::huisnummer': wildcard },
+      { 'project_ADRESSEN~bezoek::toevoeging': wildcard },
+
       // bestaande zoekvelden:
       { servicenummer: wildcard },
       { servicebonnummer: wildcard },
@@ -325,6 +331,11 @@ app.get('/servicebon/search', async (req, res) => {
           debiteurNaam: f['PROJECT::debiteurNaam'],
 
           adresLabelBezoek: f['PROJECT::adresLabelBezoek'],
+
+          // ✅ nieuw: losse adresvelden teruggeven
+          straat: f['project_ADRESSEN~bezoek::straat'] ?? null,
+          huisnummer: f['project_ADRESSEN~bezoek::huisnummer'] ?? null,
+          toevoeging: f['project_ADRESSEN~bezoek::toevoeging'] ?? null,
 
           contractNummer: f['project_SERVICECONTRACTEN::contractNummer'],
           contractCode: f['project_SERVICECONTRACTEN::contractCode'],
