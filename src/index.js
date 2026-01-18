@@ -332,7 +332,7 @@ app.get('/servicebon/search', async (req, res) => {
 
           adresLabelBezoek: f['PROJECT::adresLabelBezoek'],
 
-          // ✅ nieuw: losse adresvelden teruggeven
+          // ✅ losse adresvelden teruggeven
           straat: f['project_ADRESSEN~bezoek::straat'] ?? null,
           huisnummer: f['project_ADRESSEN~bezoek::huisnummer'] ?? null,
           toevoeging: f['project_ADRESSEN~bezoek::toevoeging'] ?? null,
@@ -412,7 +412,6 @@ app.get('/product/search', async (req, res) => {
     const token = await getToken();
 
     // FileMaker _find: elk object in query-array is een OR, velden binnen object zijn AND.
-    // We bouwen OR-regels, en (optioneel) plakken we extra AND-filters erbij.
     const baseOr = [
       { productNummerIntern: wildcard },
       { productNummerLeverancier: wildcard },
@@ -467,6 +466,10 @@ app.get('/product/search', async (req, res) => {
           merk: f.merk,
           locatiecode: f.locatiecode,
           leverancierNaam: f.leverancierNaam,
+
+          // ✅ NIEUW: inkoopprijs velden meesturen
+          inkoopprijs: f.inkoopprijs ?? null,
+          inkoopprijs_waarde: f.inkoopprijs_waarde ?? null,
 
           voorraad: f['product_VOORRAAD::aantal'] ?? null,
           voorraadRecordId: f['product_VOORRAAD::ID'] ?? null,
@@ -553,6 +556,4 @@ app.post('/fm/request', async (req, res) => {
   }
 });
 
-app.listen(PORT, () =>
-  console.log(`FM proxy running on port ${PORT}`)
-);
+app.listen(PORT, () => console.log(`FM proxy running on port ${PORT}`));
