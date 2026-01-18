@@ -290,7 +290,7 @@ app.get('/servicebon/search', async (req, res) => {
       // ✅ zoeken op adres string (straat/postcode/plaats zitten hierin)
       { 'PROJECT::adresLabelBezoek': wildcard },
 
-      // ✅ nieuw: ook kunnen zoeken op losse straat/huisnummer/toevoeging
+      // ✅ ook kunnen zoeken op losse straat/huisnummer/toevoeging
       { 'project_ADRESSEN~bezoek::straat': wildcard },
       { 'project_ADRESSEN~bezoek::huisnummer': wildcard },
       { 'project_ADRESSEN~bezoek::toevoeging': wildcard },
@@ -332,7 +332,6 @@ app.get('/servicebon/search', async (req, res) => {
 
           adresLabelBezoek: f['PROJECT::adresLabelBezoek'],
 
-          // ✅ losse adresvelden teruggeven
           straat: f['project_ADRESSEN~bezoek::straat'] ?? null,
           huisnummer: f['project_ADRESSEN~bezoek::huisnummer'] ?? null,
           toevoeging: f['project_ADRESSEN~bezoek::toevoeging'] ?? null,
@@ -376,17 +375,7 @@ app.get('/servicebon/search', async (req, res) => {
   }
 });
 
-/* 🔍 Product zoeken (Product_rest)
-   Zoekt in:
-   - productNummerIntern
-   - productNummerLeverancier
-   - omschrijvingKortNL/EN/DE
-   - leverancierNaam
-   Optioneel:
-   - onlyStock=true  => product_VOORRAAD::aantal > 0
-   - category=Voorraad => productcategorie exact match
-   - limit=1..200
-*/
+/* 🔍 Product zoeken (Product_rest) */
 app.get('/product/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
   const q = qRaw.trim();
@@ -395,7 +384,7 @@ app.get('/product/search', async (req, res) => {
     String(req.query.onlyStock || '').toLowerCase() === 'true' ||
     String(req.query.onlyStock || '') === '1';
 
-  const category = (req.query.category || '').toString().trim(); // bijv. "Voorraad"
+  const category = (req.query.category || '').toString().trim();
 
   const limitReq = Number(req.query.limit || 50);
   const limit = Number.isFinite(limitReq)
@@ -411,7 +400,6 @@ app.get('/product/search', async (req, res) => {
   try {
     const token = await getToken();
 
-    // FileMaker _find: elk object in query-array is een OR, velden binnen object zijn AND.
     const baseOr = [
       { productNummerIntern: wildcard },
       { productNummerLeverancier: wildcard },
@@ -452,25 +440,29 @@ app.get('/product/search', async (req, res) => {
         return {
           recordId: rec.recordId,
 
-          productNummerIntern: f.productNummerIntern,
-          productNummerLeverancier: f.productNummerLeverancier,
+          // ✅ staat er dus in:
+          productNummerIntern: f.productNummerIntern ?? null,
 
-          productcategorie: f.productcategorie,
-          productgroep: f.productgroep,
+          // ✅ leverancier velden:
+          productNummerLeverancier: f.productNummerLeverancier ?? null,
+          leverancierNaam: f.leverancierNaam ?? null,
 
-          omschrijvingKortNL: f.omschrijvingKortNL,
-          omschrijvingKortEN: f.omschrijvingKortEN,
-          omschrijvingKortDE: f.omschrijvingKortDE,
-          omschrijvingLang: f.omschrijvingLang,
+          productcategorie: f.productcategorie ?? null,
+          productgroep: f.productgroep ?? null,
 
-          merk: f.merk,
-          locatiecode: f.locatiecode,
-          leverancierNaam: f.leverancierNaam,
+          omschrijvingKortNL: f.omschrijvingKortNL ?? null,
+          omschrijvingKortEN: f.omschrijvingKortEN ?? null,
+          omschrijvingKortDE: f.omschrijvingKortDE ?? null,
+          omschrijvingLang: f.omschrijvingLang ?? null,
 
-          // ✅ NIEUW: inkoopprijs velden meesturen
+          merk: f.merk ?? null,
+          locatiecode: f.locatiecode ?? null,
+
+          // ✅ inkoopprijs
           inkoopprijs: f.inkoopprijs ?? null,
           inkoopprijs_waarde: f.inkoopprijs_waarde ?? null,
 
+          // voorraad (gerelateerd)
           voorraad: f['product_VOORRAAD::aantal'] ?? null,
           voorraadRecordId: f['product_VOORRAAD::ID'] ?? null,
           productId: f.ID ?? null,
