@@ -52,6 +52,9 @@ app.use(async (req, res, next) => {
 let cachedToken = null;
 let tokenExp = 0;
 
+// ✅ Hardcoded layout (zoals jij wil: geen layout env-gezeur)
+const LAYOUT_SERVICEBON = 'REST_Servicebon';
+
 // ---------- GENERIEKE FETCH HELPER ----------
 async function jsonFetch(url, opts = {}) {
   const r = await ureq(url, opts);
@@ -100,6 +103,41 @@ function okAuth(req) {
     (s && s === API_SECRET) ||
     (b && b.startsWith('Bearer ') && b.slice(7) === API_SECRET)
   );
+}
+
+// ---------- HELPER: SCRIPT AANROEPEN VIA "create record + script" ----------
+async function runScriptOnLayout({ scriptName, payloadObj, layout = LAYOUT_SERVICEBON }) {
+  if (!scriptName) throw new Error('scriptName is required');
+
+  const payloadString = JSON.stringify(payloadObj ?? {});
+  const path =
+    `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}` +
+    `/layouts/${encodeURIComponent(layout)}/records`;
+
+  const call = async (tok) =>
+    jsonFetch(path, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${tok}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        fieldData: {},
+        script: scriptName,
+        'script.param': payloadString
+      })
+    });
+
+  // 1e poging
+  let r = await call(await getToken());
+
+  // Als token verlopen is: refresh en opnieuw
+  if (r.status === 401) {
+    cachedToken = null;
+    r = await call(await getToken());
+  }
+
+  return r;
 }
 
 // ---------- ROUTES ----------
@@ -490,6 +528,44 @@ app.get('/product/search', async (req, res) => {
   } catch (err) {
     console.error('Error in /product/search:', err);
     return res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+// ✅ NIEUW: Servicebon preview (roept FileMaker script aan)
+// Scriptnaam in FM: API_Servicebon_PREVIEW
+app.post('/servicebon/preview', async (req, res) => {
+  try {
+    if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
+
+    const { status, json } = await runScriptOnLayout({
+      scriptName: 'API_Servicebon_PREVIEW',
+      payloadObj: req.body,
+      layout: LAYOUT_SERVICEBON
+    });
+
+    return res.status(status).json(json);
+  } catch (e) {
+    console.error('Error in /servicebon/preview:', e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// ✅ NIEUW: Servicebon receive (wegschrijven) (roept FileMaker script aan)
+// Scriptnaam in FM: API_Servicebon_RECEIVE
+app.post('/servicebon/receive', async (req, res) => {
+  try {
+    if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
+
+    const { status, json } = await runScriptOnLayout({
+      scriptName: 'API_Servicebon_RECEIVE',
+      payloadObj: req.body,
+      layout: LAYOUT_SERVICEBON
+    });
+
+    return res.status(status).json(json);
+  } catch (e) {
+    console.error('Error in /servicebon/receive:', e);
+    return res.status(500).json({ error: String(e.message || e) });
   }
 });
 
