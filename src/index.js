@@ -55,6 +55,10 @@ let tokenExp = 0;
 // ✅ Hardcoded layout (zoals jij wil)
 const LAYOUT_SERVICEBON = 'REST_Servicebon';
 
+// ✅ Hardcoded script names (zoals jij wil)
+const SCRIPT_SERVICEBON_PREVIEW = 'API_Servicebon_PREVIEW';
+const SCRIPT_SERVICEBON_RECEIVE = 'API_Servicebon_RECEIVE';
+
 // ---------- GENERIEKE FETCH HELPER ----------
 async function jsonFetch(url, opts = {}) {
   const r = await ureq(url, opts);
@@ -75,7 +79,7 @@ async function getToken() {
   const basic = Buffer.from(`${FM_USER}:${FM_PASS}`).toString('base64');
 
   const { status, json } = await jsonFetch(
-    `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/sessions`,
+    `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}/sessions`,
     {
       method: 'POST',
       headers: {
@@ -106,7 +110,11 @@ function okAuth(req) {
 }
 
 // ---------- SCRIPT RUNNER VIA _find (GEEN create-record nodig) ----------
-async function runScriptViaFind({ scriptName, payloadObj, layout = LAYOUT_SERVICEBON }) {
+async function runScriptViaFind({
+  scriptName,
+  payloadObj,
+  layout = LAYOUT_SERVICEBON
+}) {
   if (!scriptName) throw new Error('scriptName is required');
 
   const token = await getToken();
@@ -116,38 +124,35 @@ async function runScriptViaFind({ scriptName, payloadObj, layout = LAYOUT_SERVIC
     `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}` +
     `/layouts/${encodeURIComponent(layout)}/_find`;
 
-  // query:[{}] = “match alles” (we willen alleen het script uitvoeren)
-  const { status, json } = await jsonFetch(url, {
+  const bodyObj = {
+    // query:[{}] = “match alles” (we willen alleen het script uitvoeren)
+    query: [{}],
+    limit: 1,
+    script: scriptName,
+    'script.param': payloadString
+  };
+
+  let { status, json } = await jsonFetch(url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({
-      query: [{}],
-      limit: 1,
-      script: scriptName,
-      'script.param': payloadString
-    })
+    body: JSON.stringify(bodyObj)
   });
 
   // token verlopen? opnieuw proberen
   if (status === 401) {
     cachedToken = null;
     const token2 = await getToken();
-    return jsonFetch(url, {
+    ({ status, json } = await jsonFetch(url, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token2}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        query: [{}],
-        limit: 1,
-        script: scriptName,
-        'script.param': payloadString
-      })
-    });
+      body: JSON.stringify(bodyObj)
+    }));
   }
 
   return { status, json };
@@ -157,12 +162,15 @@ async function runScriptViaFind({ scriptName, payloadObj, layout = LAYOUT_SERVIC
 app.get('/health', (_, res) => res.type('text/plain').send('OK'));
 
 /* 🧪 TEST ROUTE — check outbound connectivity */
-app.get('/test', async (req, res) => {
+app.get('/test', async (_req, res) => {
   try {
     const response = await fetch('https://www.google.com');
     const html = await response.text();
     res.status(200).send(
-      `Connected!<br>Status: ${response.status}<br><pre>${html.substring(0, 300)}...</pre>`
+      `Connected!<br>Status: ${response.status}<br><pre>${html.substring(
+        0,
+        300
+      )}...</pre>`
     );
   } catch (err) {
     res.status(500).send(`Connection failed: ${err.message}`);
@@ -191,7 +199,8 @@ app.get('/whois-ip', async (req, res) => {
           if (ip) return res.json({ ip });
         } catch {
           const cand = text.trim();
-          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand)) return res.json({ ip: cand });
+          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand))
+            return res.json({ ip: cand });
         }
       } catch {}
     }
@@ -207,7 +216,9 @@ app.get('/debiteur/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
   const q = qRaw.trim();
 
-  if (!q) return res.status(400).json({ error: 'q (search term) is required' });
+  if (!q) {
+    return res.status(400).json({ error: 'q (search term) is required' });
+  }
 
   const isNumeric = /^[0-9]+$/.test(q);
   const wildcard = `*${q}*`;
@@ -215,44 +226,62 @@ app.get('/debiteur/search', async (req, res) => {
   try {
     const token = await getToken();
 
+    // ---------- 1) BASIS-QUERY: nummer + naam ----------
     const baseQuery = [];
-    if (isNumeric) baseQuery.push({ debiteurNummer: q });
+
+    // exact nummer
+    if (isNumeric) {
+      baseQuery.push({ debiteurNummer: q });
+    }
+
+    // naam bevat q
     baseQuery.push({ debiteurNaam: wildcard });
 
     const callFind = async (query) =>
       jsonFetch(
-        `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Debiteur_Rest/_find`,
+        `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(
+          FM_DB
+        )}/layouts/Debiteur_Rest/_find`,
         {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${token}`,
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({ query, limit: 50 })
+          body: JSON.stringify({
+            query,
+            limit: 50
+          })
         }
       );
 
+    // Eerst zoeken op nummer/naam
     let { status, json } = await callFind(baseQuery);
     let fmCode = json?.messages?.[0]?.code;
 
     if (status === 200 && fmCode === '0') {
       const records = json?.response?.data || [];
-      return res.json(
-        records.map((rec) => ({
-          recordId: rec.recordId,
-          debiteurNummer: rec.fieldData.debiteurNummer,
-          debiteurNaam: rec.fieldData.debiteurNaam,
-          telefoon: rec.fieldData.algTelefoon,
-          email: rec.fieldData.algEmail
-        }))
-      );
+      const mapped = records.map((rec) => ({
+        recordId: rec.recordId,
+        debiteurNummer: rec.fieldData.debiteurNummer,
+        debiteurNaam: rec.fieldData.debiteurNaam,
+        telefoon: rec.fieldData.algTelefoon,
+        email: rec.fieldData.algEmail
+      }));
+      return res.json(mapped);
     }
 
+    // Als er GEEN records zijn (401), proberen we adres-zoek
     if (!(status === 200 && fmCode === '401')) {
-      console.error('FileMaker error in baseQuery:', status, JSON.stringify(json));
+      console.error(
+        'FileMaker error in baseQuery:',
+        status,
+        JSON.stringify(json)
+      );
       return res.status(502).json({ error: 'no matches' });
     }
 
+    // ---------- 2) TWEEDE POGING: alleen adres-velden ----------
     const addressQuery = [
       { 'debiteur_ADRESSEN::Adres': wildcard },
       { 'debiteur_ADRESSEN::Plaats': wildcard },
@@ -266,20 +295,26 @@ app.get('/debiteur/search', async (req, res) => {
 
     if (status === 200 && fmCode === '0') {
       const records = json?.response?.data || [];
-      return res.json(
-        records.map((rec) => ({
-          recordId: rec.recordId,
-          debiteurNummer: rec.fieldData.debiteurNummer,
-          debiteurNaam: rec.fieldData.debiteurNaam,
-          telefoon: rec.fieldData.algTelefoon,
-          email: rec.fieldData.algEmail
-        }))
-      );
+      const mapped = records.map((rec) => ({
+        recordId: rec.recordId,
+        debiteurNummer: rec.fieldData.debiteurNummer,
+        debiteurNaam: rec.fieldData.debiteurNaam,
+        telefoon: rec.fieldData.algTelefoon,
+        email: rec.fieldData.algEmail
+      }));
+      return res.json(mapped);
     }
 
-    if (status === 200 && fmCode === '401') return res.json({ error: 'no matches' });
+    if (status === 200 && fmCode === '401') {
+      // ook op adres niets gevonden
+      return res.json({ error: 'no matches' });
+    }
 
-    console.error('FileMaker error in addressQuery:', status, JSON.stringify(json));
+    console.error(
+      'FileMaker error in addressQuery:',
+      status,
+      JSON.stringify(json)
+    );
     return res.json({ error: 'no matches' });
   } catch (err) {
     console.error('Error in /debiteur/search:', err);
@@ -292,7 +327,9 @@ app.get('/servicebon/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
   const q = qRaw.trim();
 
-  if (!q) return res.status(400).json({ error: 'q (search term) is required' });
+  if (!q) {
+    return res.status(400).json({ error: 'q (search term) is required' });
+  }
 
   const wildcard = `*${q}*`;
 
@@ -307,24 +344,35 @@ app.get('/servicebon/search', async (req, res) => {
       { 'project_SERVICECONTRACTEN::contractNummer': wildcard },
       { 'project_SERVICECONTRACTEN::machine': wildcard },
       { 'project_SERVICECONTRACTEN::machineType': wildcard },
+
+      // ✅ zoeken op adres string (straat/postcode/plaats zitten hierin)
       { 'PROJECT::adresLabelBezoek': wildcard },
+
+      // ✅ ook kunnen zoeken op losse straat/huisnummer/toevoeging
       { 'project_ADRESSEN~bezoek::straat': wildcard },
       { 'project_ADRESSEN~bezoek::huisnummer': wildcard },
       { 'project_ADRESSEN~bezoek::toevoeging': wildcard },
+
+      // bestaande zoekvelden:
       { servicenummer: wildcard },
       { servicebonnummer: wildcard },
       { 'project_SERVICENUMMER::omschrijvingKort': wildcard }
     ];
 
     const { status, json } = await jsonFetch(
-      `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Servicebon_Rest/_find`,
+      `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(
+        FM_DB
+      )}/layouts/Servicebon_Rest/_find`,
       {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ query: fmQuery, limit: 50 })
+        body: JSON.stringify({
+          query: fmQuery,
+          limit: 50
+        })
       }
     );
 
@@ -338,21 +386,27 @@ app.get('/servicebon/search', async (req, res) => {
           recordId: rec.recordId,
           projectcode: f.projectcode,
           projectNaam: f.projectNaam,
+
           debiteurNummer: f['PROJECT::debiteurNummer'],
           debiteurNaam: f['PROJECT::debiteurNaam'],
+
           adresLabelBezoek: f['PROJECT::adresLabelBezoek'],
+
           straat: f['project_ADRESSEN~bezoek::straat'] ?? null,
           huisnummer: f['project_ADRESSEN~bezoek::huisnummer'] ?? null,
           toevoeging: f['project_ADRESSEN~bezoek::toevoeging'] ?? null,
+
           contractNummer: f['project_SERVICECONTRACTEN::contractNummer'],
           contractCode: f['project_SERVICECONTRACTEN::contractCode'],
           machineCode: f['project_SERVICECONTRACTEN::machine'],
           machineType: f['project_SERVICECONTRACTEN::machineType'],
+
           servicenummerId: f.id_servicenummer,
           servicenummer: f.servicenummer,
           servicebonnummer: f.servicebonnummer,
           machineOmschrijving: f['project_SERVICENUMMER::omschrijvingKort'],
           meldingsdatum: f.__createDate,
+
           contractDatumStart: f['project_SERVICECONTRACTEN::datumStart'],
           contractDatumEinde: f['project_SERVICECONTRACTEN::datumEinde']
         };
@@ -361,9 +415,15 @@ app.get('/servicebon/search', async (req, res) => {
       return res.json(mapped);
     }
 
-    if (status === 200 && fmCode === '401') return res.json({ error: 'no matches' });
+    if (status === 200 && fmCode === '401') {
+      return res.json({ error: 'no matches' });
+    }
 
-    console.error('FileMaker find error in /servicebon/search:', status, JSON.stringify(json));
+    console.error(
+      'FileMaker find error in /servicebon/search:',
+      status,
+      JSON.stringify(json)
+    );
     return res.status(502).json({
       error: 'FileMaker response error',
       fmStatus: status,
@@ -387,9 +447,13 @@ app.get('/product/search', async (req, res) => {
   const category = (req.query.category || '').toString().trim();
 
   const limitReq = Number(req.query.limit || 50);
-  const limit = Number.isFinite(limitReq) ? Math.min(200, Math.max(1, limitReq)) : 50;
+  const limit = Number.isFinite(limitReq)
+    ? Math.min(200, Math.max(1, limitReq))
+    : 50;
 
-  if (!q) return res.status(400).json({ error: 'q (search term) is required' });
+  if (!q) {
+    return res.status(400).json({ error: 'q (search term) is required' });
+  }
 
   const wildcard = `*${q}*`;
 
@@ -413,14 +477,19 @@ app.get('/product/search', async (req, res) => {
     });
 
     const { status, json } = await jsonFetch(
-      `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Product_rest/_find`,
+      `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(
+        FM_DB
+      )}/layouts/Product_rest/_find`,
       {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ query: fmQuery, limit })
+        body: JSON.stringify({
+          query: fmQuery,
+          limit
+        })
       }
     );
 
@@ -428,36 +497,53 @@ app.get('/product/search', async (req, res) => {
 
     if (status === 200 && fmCode === '0') {
       const records = json?.response?.data || [];
-      return res.json(
-        records.map((rec) => {
-          const f = rec.fieldData || {};
-          return {
-            recordId: rec.recordId,
-            productNummerIntern: f.productNummerIntern ?? null,
-            productNummerLeverancier: f.productNummerLeverancier ?? null,
-            leverancierNaam: f.leverancierNaam ?? null,
-            productcategorie: f.productcategorie ?? null,
-            productgroep: f.productgroep ?? null,
-            omschrijvingKortNL: f.omschrijvingKortNL ?? null,
-            omschrijvingKortEN: f.omschrijvingKortEN ?? null,
-            omschrijvingKortDE: f.omschrijvingKortDE ?? null,
-            omschrijvingLang: f.omschrijvingLang ?? null,
-            merk: f.merk ?? null,
-            locatiecode: f.locatiecode ?? null,
-            inkoopprijs: f.inkoopprijs ?? null,
-            inkoopprijs_waarde: f.inkoopprijs_waarde ?? null,
-            voorraad: f['product_VOORRAAD::aantal'] ?? null,
-            voorraadRecordId: f['product_VOORRAAD::ID'] ?? null,
-            productId: f.ID ?? null,
-            voorraadProductId: f['product_VOORRAAD::id_product'] ?? null
-          };
-        })
-      );
+      const mapped = records.map((rec) => {
+        const f = rec.fieldData || {};
+        return {
+          recordId: rec.recordId,
+
+          // ✅ staat er dus in:
+          productNummerIntern: f.productNummerIntern ?? null,
+
+          // ✅ leverancier velden:
+          productNummerLeverancier: f.productNummerLeverancier ?? null,
+          leverancierNaam: f.leverancierNaam ?? null,
+
+          productcategorie: f.productcategorie ?? null,
+          productgroep: f.productgroep ?? null,
+
+          omschrijvingKortNL: f.omschrijvingKortNL ?? null,
+          omschrijvingKortEN: f.omschrijvingKortEN ?? null,
+          omschrijvingKortDE: f.omschrijvingKortDE ?? null,
+          omschrijvingLang: f.omschrijvingLang ?? null,
+
+          merk: f.merk ?? null,
+          locatiecode: f.locatiecode ?? null,
+
+          // ✅ inkoopprijs
+          inkoopprijs: f.inkoopprijs ?? null,
+          inkoopprijs_waarde: f.inkoopprijs_waarde ?? null,
+
+          // voorraad (gerelateerd)
+          voorraad: f['product_VOORRAAD::aantal'] ?? null,
+          voorraadRecordId: f['product_VOORRAAD::ID'] ?? null,
+          productId: f.ID ?? null,
+          voorraadProductId: f['product_VOORRAAD::id_product'] ?? null
+        };
+      });
+
+      return res.json(mapped);
     }
 
-    if (status === 200 && fmCode === '401') return res.json({ error: 'no matches' });
+    if (status === 200 && fmCode === '401') {
+      return res.json({ error: 'no matches' });
+    }
 
-    console.error('FileMaker find error in /product/search:', status, JSON.stringify(json));
+    console.error(
+      'FileMaker find error in /product/search:',
+      status,
+      JSON.stringify(json)
+    );
     return res.status(502).json({
       error: 'FileMaker response error',
       fmStatus: status,
@@ -475,7 +561,7 @@ app.post('/servicebon/preview', async (req, res) => {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
     const { status, json } = await runScriptViaFind({
-      scriptName: 'API_Servicebon_PREVIEW',
+      scriptName: SCRIPT_SERVICEBON_PREVIEW,
       payloadObj: req.body,
       layout: LAYOUT_SERVICEBON
     });
@@ -493,7 +579,7 @@ app.post('/servicebon/receive', async (req, res) => {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
     const { status, json } = await runScriptViaFind({
-      scriptName: 'API_Servicebon_RECEIVE',
+      scriptName: SCRIPT_SERVICEBON_RECEIVE,
       payloadObj: req.body,
       layout: LAYOUT_SERVICEBON
     });
@@ -510,14 +596,16 @@ app.post('/fm/request', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
-    let { method, path, body, action, layout, recordId, fieldData } = req.body || {};
+    let { method, path, body, action, layout, recordId, fieldData } =
+      req.body || {};
 
     if (action === 'getLayouts') {
       method = 'GET';
       path = '/layouts';
     }
     if (action === 'getRecord') {
-      if (!layout || !recordId) return res.status(400).json({ error: 'layout/recordId required' });
+      if (!layout || !recordId)
+        return res.status(400).json({ error: 'layout/recordId required' });
       method = 'GET';
       path = `/layouts/${layout}/records/${recordId}`;
     }
@@ -527,13 +615,18 @@ app.post('/fm/request', async (req, res) => {
       body = { fieldData };
     }
 
-    if (!method || !path) return res.status(400).json({ error: 'method/path required' });
-    if (!path.startsWith('/layouts')) return res.status(400).json({ error: 'path must start with /layouts' });
+    if (!method || !path)
+      return res.status(400).json({ error: 'method/path required' });
+
+    if (!path.startsWith('/layouts'))
+      return res.status(400).json({ error: 'path must start with /layouts' });
 
     const token = await getToken();
 
     const callFM = async (tok) =>
-      jsonFetch(`${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}${path}`, {
+      jsonFetch(`${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(
+        FM_DB
+      )}${path}`, {
         method,
         headers: {
           Authorization: `Bearer ${tok}`,
