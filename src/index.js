@@ -52,12 +52,15 @@ app.use(async (req, res, next) => {
 let cachedToken = null;
 let tokenExp = 0;
 
-// ✅ Hardcoded layout (zoals jij wil)
+// ✅ Hardcoded layout + scripts
 const LAYOUT_SERVICEBON = 'REST_Servicebon';
-
-// ✅ Hardcoded script names (zoals jij wil)
 const SCRIPT_SERVICEBON_PREVIEW = 'API_Servicebon_PREVIEW';
 const SCRIPT_SERVICEBON_RECEIVE = 'API_Servicebon_RECEIVE';
+
+// ✅ “match-all” find criteria: FileMaker accepteert GEEN lege criteria.
+// Default: ID="*" (bestaat in jouw fieldMetaData)
+const FIND_MATCH_FIELD = process.env.FM_FIND_MATCH_FIELD || 'ID';
+const FIND_MATCH_VALUE = process.env.FM_FIND_MATCH_VALUE || '*';
 
 // ---------- GENERIEKE FETCH HELPER ----------
 async function jsonFetch(url, opts = {}) {
@@ -117,42 +120,38 @@ async function runScriptViaFind({
 }) {
   if (!scriptName) throw new Error('scriptName is required');
 
-  const token = await getToken();
   const payloadString = JSON.stringify(payloadObj ?? {});
-
   const url =
     `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}` +
     `/layouts/${encodeURIComponent(layout)}/_find`;
 
+  const findQuery = [{ [FIND_MATCH_FIELD]: FIND_MATCH_VALUE }];
+
   const bodyObj = {
-    // query:[{}] = “match alles” (we willen alleen het script uitvoeren)
-    query: [{}],
+    query: findQuery,
     limit: 1,
     script: scriptName,
     'script.param': payloadString
   };
 
-  let { status, json } = await jsonFetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(bodyObj)
-  });
+  const callOnce = async (tok) =>
+    jsonFetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${tok}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(bodyObj)
+    });
+
+  let token = await getToken();
+  let { status, json } = await callOnce(token);
 
   // token verlopen? opnieuw proberen
   if (status === 401) {
     cachedToken = null;
-    const token2 = await getToken();
-    ({ status, json } = await jsonFetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token2}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(bodyObj)
-    }));
+    token = await getToken();
+    ({ status, json } = await callOnce(token));
   }
 
   return { status, json };
@@ -226,15 +225,8 @@ app.get('/debiteur/search', async (req, res) => {
   try {
     const token = await getToken();
 
-    // ---------- 1) BASIS-QUERY: nummer + naam ----------
     const baseQuery = [];
-
-    // exact nummer
-    if (isNumeric) {
-      baseQuery.push({ debiteurNummer: q });
-    }
-
-    // naam bevat q
+    if (isNumeric) baseQuery.push({ debiteurNummer: q });
     baseQuery.push({ debiteurNaam: wildcard });
 
     const callFind = async (query) =>
@@ -248,40 +240,31 @@ app.get('/debiteur/search', async (req, res) => {
             Authorization: `Bearer ${token}`,
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({
-            query,
-            limit: 50
-          })
+          body: JSON.stringify({ query, limit: 50 })
         }
       );
 
-    // Eerst zoeken op nummer/naam
     let { status, json } = await callFind(baseQuery);
     let fmCode = json?.messages?.[0]?.code;
 
     if (status === 200 && fmCode === '0') {
       const records = json?.response?.data || [];
-      const mapped = records.map((rec) => ({
-        recordId: rec.recordId,
-        debiteurNummer: rec.fieldData.debiteurNummer,
-        debiteurNaam: rec.fieldData.debiteurNaam,
-        telefoon: rec.fieldData.algTelefoon,
-        email: rec.fieldData.algEmail
-      }));
-      return res.json(mapped);
+      return res.json(
+        records.map((rec) => ({
+          recordId: rec.recordId,
+          debiteurNummer: rec.fieldData.debiteurNummer,
+          debiteurNaam: rec.fieldData.debiteurNaam,
+          telefoon: rec.fieldData.algTelefoon,
+          email: rec.fieldData.algEmail
+        }))
+      );
     }
 
-    // Als er GEEN records zijn (401), proberen we adres-zoek
     if (!(status === 200 && fmCode === '401')) {
-      console.error(
-        'FileMaker error in baseQuery:',
-        status,
-        JSON.stringify(json)
-      );
+      console.error('FileMaker error in baseQuery:', status, JSON.stringify(json));
       return res.status(502).json({ error: 'no matches' });
     }
 
-    // ---------- 2) TWEEDE POGING: alleen adres-velden ----------
     const addressQuery = [
       { 'debiteur_ADRESSEN::Adres': wildcard },
       { 'debiteur_ADRESSEN::Plaats': wildcard },
@@ -295,26 +278,20 @@ app.get('/debiteur/search', async (req, res) => {
 
     if (status === 200 && fmCode === '0') {
       const records = json?.response?.data || [];
-      const mapped = records.map((rec) => ({
-        recordId: rec.recordId,
-        debiteurNummer: rec.fieldData.debiteurNummer,
-        debiteurNaam: rec.fieldData.debiteurNaam,
-        telefoon: rec.fieldData.algTelefoon,
-        email: rec.fieldData.algEmail
-      }));
-      return res.json(mapped);
+      return res.json(
+        records.map((rec) => ({
+          recordId: rec.recordId,
+          debiteurNummer: rec.fieldData.debiteurNummer,
+          debiteurNaam: rec.fieldData.debiteurNaam,
+          telefoon: rec.fieldData.algTelefoon,
+          email: rec.fieldData.algEmail
+        }))
+      );
     }
 
-    if (status === 200 && fmCode === '401') {
-      // ook op adres niets gevonden
-      return res.json({ error: 'no matches' });
-    }
+    if (status === 200 && fmCode === '401') return res.json({ error: 'no matches' });
 
-    console.error(
-      'FileMaker error in addressQuery:',
-      status,
-      JSON.stringify(json)
-    );
+    console.error('FileMaker error in addressQuery:', status, JSON.stringify(json));
     return res.json({ error: 'no matches' });
   } catch (err) {
     console.error('Error in /debiteur/search:', err);
@@ -322,14 +299,12 @@ app.get('/debiteur/search', async (req, res) => {
   }
 });
 
-/* 🔍 Servicebon zoeken (Servicebon_Rest) – uitgebreide versie */
+/* 🔍 Servicebon zoeken (Servicebon_Rest) */
 app.get('/servicebon/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
   const q = qRaw.trim();
 
-  if (!q) {
-    return res.status(400).json({ error: 'q (search term) is required' });
-  }
+  if (!q) return res.status(400).json({ error: 'q (search term) is required' });
 
   const wildcard = `*${q}*`;
 
@@ -344,16 +319,10 @@ app.get('/servicebon/search', async (req, res) => {
       { 'project_SERVICECONTRACTEN::contractNummer': wildcard },
       { 'project_SERVICECONTRACTEN::machine': wildcard },
       { 'project_SERVICECONTRACTEN::machineType': wildcard },
-
-      // ✅ zoeken op adres string (straat/postcode/plaats zitten hierin)
       { 'PROJECT::adresLabelBezoek': wildcard },
-
-      // ✅ ook kunnen zoeken op losse straat/huisnummer/toevoeging
       { 'project_ADRESSEN~bezoek::straat': wildcard },
       { 'project_ADRESSEN~bezoek::huisnummer': wildcard },
       { 'project_ADRESSEN~bezoek::toevoeging': wildcard },
-
-      // bestaande zoekvelden:
       { servicenummer: wildcard },
       { servicebonnummer: wildcard },
       { 'project_SERVICENUMMER::omschrijvingKort': wildcard }
@@ -369,10 +338,7 @@ app.get('/servicebon/search', async (req, res) => {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          query: fmQuery,
-          limit: 50
-        })
+        body: JSON.stringify({ query: fmQuery, limit: 50 })
       }
     );
 
@@ -386,27 +352,21 @@ app.get('/servicebon/search', async (req, res) => {
           recordId: rec.recordId,
           projectcode: f.projectcode,
           projectNaam: f.projectNaam,
-
           debiteurNummer: f['PROJECT::debiteurNummer'],
           debiteurNaam: f['PROJECT::debiteurNaam'],
-
           adresLabelBezoek: f['PROJECT::adresLabelBezoek'],
-
           straat: f['project_ADRESSEN~bezoek::straat'] ?? null,
           huisnummer: f['project_ADRESSEN~bezoek::huisnummer'] ?? null,
           toevoeging: f['project_ADRESSEN~bezoek::toevoeging'] ?? null,
-
           contractNummer: f['project_SERVICECONTRACTEN::contractNummer'],
           contractCode: f['project_SERVICECONTRACTEN::contractCode'],
           machineCode: f['project_SERVICECONTRACTEN::machine'],
           machineType: f['project_SERVICECONTRACTEN::machineType'],
-
           servicenummerId: f.id_servicenummer,
           servicenummer: f.servicenummer,
           servicebonnummer: f.servicebonnummer,
           machineOmschrijving: f['project_SERVICENUMMER::omschrijvingKort'],
           meldingsdatum: f.__createDate,
-
           contractDatumStart: f['project_SERVICECONTRACTEN::datumStart'],
           contractDatumEinde: f['project_SERVICECONTRACTEN::datumEinde']
         };
@@ -415,15 +375,9 @@ app.get('/servicebon/search', async (req, res) => {
       return res.json(mapped);
     }
 
-    if (status === 200 && fmCode === '401') {
-      return res.json({ error: 'no matches' });
-    }
+    if (status === 200 && fmCode === '401') return res.json({ error: 'no matches' });
 
-    console.error(
-      'FileMaker find error in /servicebon/search:',
-      status,
-      JSON.stringify(json)
-    );
+    console.error('FileMaker find error in /servicebon/search:', status, JSON.stringify(json));
     return res.status(502).json({
       error: 'FileMaker response error',
       fmStatus: status,
@@ -451,9 +405,7 @@ app.get('/product/search', async (req, res) => {
     ? Math.min(200, Math.max(1, limitReq))
     : 50;
 
-  if (!q) {
-    return res.status(400).json({ error: 'q (search term) is required' });
-  }
+  if (!q) return res.status(400).json({ error: 'q (search term) is required' });
 
   const wildcard = `*${q}*`;
 
@@ -486,10 +438,7 @@ app.get('/product/search', async (req, res) => {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          query: fmQuery,
-          limit
-        })
+        body: JSON.stringify({ query: fmQuery, limit })
       }
     );
 
@@ -497,53 +446,36 @@ app.get('/product/search', async (req, res) => {
 
     if (status === 200 && fmCode === '0') {
       const records = json?.response?.data || [];
-      const mapped = records.map((rec) => {
-        const f = rec.fieldData || {};
-        return {
-          recordId: rec.recordId,
-
-          // ✅ staat er dus in:
-          productNummerIntern: f.productNummerIntern ?? null,
-
-          // ✅ leverancier velden:
-          productNummerLeverancier: f.productNummerLeverancier ?? null,
-          leverancierNaam: f.leverancierNaam ?? null,
-
-          productcategorie: f.productcategorie ?? null,
-          productgroep: f.productgroep ?? null,
-
-          omschrijvingKortNL: f.omschrijvingKortNL ?? null,
-          omschrijvingKortEN: f.omschrijvingKortEN ?? null,
-          omschrijvingKortDE: f.omschrijvingKortDE ?? null,
-          omschrijvingLang: f.omschrijvingLang ?? null,
-
-          merk: f.merk ?? null,
-          locatiecode: f.locatiecode ?? null,
-
-          // ✅ inkoopprijs
-          inkoopprijs: f.inkoopprijs ?? null,
-          inkoopprijs_waarde: f.inkoopprijs_waarde ?? null,
-
-          // voorraad (gerelateerd)
-          voorraad: f['product_VOORRAAD::aantal'] ?? null,
-          voorraadRecordId: f['product_VOORRAAD::ID'] ?? null,
-          productId: f.ID ?? null,
-          voorraadProductId: f['product_VOORRAAD::id_product'] ?? null
-        };
-      });
-
-      return res.json(mapped);
+      return res.json(
+        records.map((rec) => {
+          const f = rec.fieldData || {};
+          return {
+            recordId: rec.recordId,
+            productNummerIntern: f.productNummerIntern ?? null,
+            productNummerLeverancier: f.productNummerLeverancier ?? null,
+            leverancierNaam: f.leverancierNaam ?? null,
+            productcategorie: f.productcategorie ?? null,
+            productgroep: f.productgroep ?? null,
+            omschrijvingKortNL: f.omschrijvingKortNL ?? null,
+            omschrijvingKortEN: f.omschrijvingKortEN ?? null,
+            omschrijvingKortDE: f.omschrijvingKortDE ?? null,
+            omschrijvingLang: f.omschrijvingLang ?? null,
+            merk: f.merk ?? null,
+            locatiecode: f.locatiecode ?? null,
+            inkoopprijs: f.inkoopprijs ?? null,
+            inkoopprijs_waarde: f.inkoopprijs_waarde ?? null,
+            voorraad: f['product_VOORRAAD::aantal'] ?? null,
+            voorraadRecordId: f['product_VOORRAAD::ID'] ?? null,
+            productId: f.ID ?? null,
+            voorraadProductId: f['product_VOORRAAD::id_product'] ?? null
+          };
+        })
+      );
     }
 
-    if (status === 200 && fmCode === '401') {
-      return res.json({ error: 'no matches' });
-    }
+    if (status === 200 && fmCode === '401') return res.json({ error: 'no matches' });
 
-    console.error(
-      'FileMaker find error in /product/search:',
-      status,
-      JSON.stringify(json)
-    );
+    console.error('FileMaker find error in /product/search:', status, JSON.stringify(json));
     return res.status(502).json({
       error: 'FileMaker response error',
       fmStatus: status,
@@ -555,7 +487,7 @@ app.get('/product/search', async (req, res) => {
   }
 });
 
-// ✅ NIEUW: Preview via script (GEEN record create) → script: API_Servicebon_PREVIEW
+// ✅ PREVIEW via script
 app.post('/servicebon/preview', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
@@ -573,7 +505,7 @@ app.post('/servicebon/preview', async (req, res) => {
   }
 });
 
-// ✅ NIEUW: Receive via script (GEEN record create) → script: API_Servicebon_RECEIVE
+// ✅ RECEIVE via script
 app.post('/servicebon/receive', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
