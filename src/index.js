@@ -75,7 +75,7 @@ async function getToken() {
   const basic = Buffer.from(`${FM_USER}:${FM_PASS}`).toString('base64');
 
   const { status, json } = await jsonFetch(
-    `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/sessions`,
+    `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}/sessions`,
     {
       method: 'POST',
       headers: {
@@ -99,46 +99,52 @@ async function getToken() {
 function okAuth(req) {
   const s = req.header('X-Webhook-Secret');
   const b = req.header('Authorization');
+  const k = req.header('x-api-key');
+
   return (
-    (s && s === API_SECRET) ||
+    (k && k.trim() === API_SECRET) ||
+    (s && s.trim() === API_SECRET) ||
     (b && b.startsWith('Bearer ') && b.slice(7).trim() === API_SECRET)
   );
 }
 
-// ---------- SCRIPT RUNNER VIA _find (GEEN create-record nodig) ----------
-async function runScriptViaFind({ scriptName, payloadObj, layout = LAYOUT_SERVICEBON }) {
+// ---------- SCRIPT RUNNER VIA RECORDS (werkt bij jou wél) ----------
+async function runScriptViaRecords({
+  scriptName,
+  payloadObj,
+  layout = LAYOUT_SERVICEBON,
+  limit = 1
+}) {
   if (!scriptName) throw new Error('scriptName is required');
 
+  const token = await getToken();
   const payloadString = JSON.stringify(payloadObj ?? {});
-  const base =
-    `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}` +
-    `/layouts/${encodeURIComponent(layout)}/_find`;
+  const encodedParam = encodeURIComponent(payloadString);
 
-  const call = async (token) =>
-    jsonFetch(base, {
-      method: 'POST',
+  const url =
+    `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}` +
+    `/layouts/${encodeURIComponent(layout)}/records` +
+    `?_limit=${encodeURIComponent(String(limit))}` +
+    `&script=${encodeURIComponent(scriptName)}` +
+    `&script.param=${encodedParam}`;
+
+  const call = async (tok) =>
+    jsonFetch(url, {
+      method: 'GET',
       headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        query: [{}],
-        limit: 1,
-        script: scriptName,
-        'script.param': payloadString
-      })
+        Authorization: `Bearer ${tok}`
+      }
     });
 
-  let token = await getToken();
   let r = await call(token);
 
+  // token verlopen? opnieuw proberen
   if (r.status === 401) {
     cachedToken = null;
-    token = await getToken();
-    r = await call(token);
+    r = await call(await getToken());
   }
 
-  return r; // { status, json }
+  return r;
 }
 
 // ---------- ROUTES ----------
@@ -150,7 +156,10 @@ app.get('/test', async (_req, res) => {
     const response = await fetch('https://www.google.com');
     const html = await response.text();
     res.status(200).send(
-      `Connected!<br>Status: ${response.status}<br><pre>${html.substring(0, 300)}...</pre>`
+      `Connected!<br>Status: ${response.status}<br><pre>${html.substring(
+        0,
+        300
+      )}...</pre>`
     );
   } catch (err) {
     res.status(500).send(`Connection failed: ${err.message}`);
@@ -179,7 +188,8 @@ app.get('/whois-ip', async (req, res) => {
           if (ip) return res.json({ ip });
         } catch {
           const cand = text.trim();
-          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand)) return res.json({ ip: cand });
+          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand))
+            return res.json({ ip: cand });
         }
       } catch {}
     }
@@ -195,7 +205,9 @@ app.get('/debiteur/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
   const q = qRaw.trim();
 
-  if (!q) return res.status(400).json({ error: 'q (search term) is required' });
+  if (!q) {
+    return res.status(400).json({ error: 'q (search term) is required' });
+  }
 
   const isNumeric = /^[0-9]+$/.test(q);
   const wildcard = `*${q}*`;
@@ -216,7 +228,10 @@ app.get('/debiteur/search', async (req, res) => {
             Authorization: `Bearer ${token}`,
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({ query, limit: 50 })
+          body: JSON.stringify({
+            query,
+            limit: 50
+          })
         }
       );
 
@@ -225,19 +240,22 @@ app.get('/debiteur/search', async (req, res) => {
 
     if (status === 200 && fmCode === '0') {
       const records = json?.response?.data || [];
-      return res.json(
-        records.map((rec) => ({
-          recordId: rec.recordId,
-          debiteurNummer: rec.fieldData.debiteurNummer,
-          debiteurNaam: rec.fieldData.debiteurNaam,
-          telefoon: rec.fieldData.algTelefoon,
-          email: rec.fieldData.algEmail
-        }))
-      );
+      const mapped = records.map((rec) => ({
+        recordId: rec.recordId,
+        debiteurNummer: rec.fieldData.debiteurNummer,
+        debiteurNaam: rec.fieldData.debiteurNaam,
+        telefoon: rec.fieldData.algTelefoon,
+        email: rec.fieldData.algEmail
+      }));
+      return res.json(mapped);
     }
 
     if (!(status === 200 && fmCode === '401')) {
-      console.error('FileMaker error in baseQuery:', status, JSON.stringify(json));
+      console.error(
+        'FileMaker error in baseQuery:',
+        status,
+        JSON.stringify(json)
+      );
       return res.status(502).json({ error: 'no matches' });
     }
 
@@ -254,20 +272,25 @@ app.get('/debiteur/search', async (req, res) => {
 
     if (status === 200 && fmCode === '0') {
       const records = json?.response?.data || [];
-      return res.json(
-        records.map((rec) => ({
-          recordId: rec.recordId,
-          debiteurNummer: rec.fieldData.debiteurNummer,
-          debiteurNaam: rec.fieldData.debiteurNaam,
-          telefoon: rec.fieldData.algTelefoon,
-          email: rec.fieldData.algEmail
-        }))
-      );
+      const mapped = records.map((rec) => ({
+        recordId: rec.recordId,
+        debiteurNummer: rec.fieldData.debiteurNummer,
+        debiteurNaam: rec.fieldData.debiteurNaam,
+        telefoon: rec.fieldData.algTelefoon,
+        email: rec.fieldData.algEmail
+      }));
+      return res.json(mapped);
     }
 
-    if (status === 200 && fmCode === '401') return res.json({ error: 'no matches' });
+    if (status === 200 && fmCode === '401') {
+      return res.json({ error: 'no matches' });
+    }
 
-    console.error('FileMaker error in addressQuery:', status, JSON.stringify(json));
+    console.error(
+      'FileMaker error in addressQuery:',
+      status,
+      JSON.stringify(json)
+    );
     return res.json({ error: 'no matches' });
   } catch (err) {
     console.error('Error in /debiteur/search:', err);
@@ -280,7 +303,9 @@ app.get('/servicebon/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
   const q = qRaw.trim();
 
-  if (!q) return res.status(400).json({ error: 'q (search term) is required' });
+  if (!q) {
+    return res.status(400).json({ error: 'q (search term) is required' });
+  }
 
   const wildcard = `*${q}*`;
 
@@ -312,7 +337,10 @@ app.get('/servicebon/search', async (req, res) => {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ query: fmQuery, limit: 50 })
+        body: JSON.stringify({
+          query: fmQuery,
+          limit: 50
+        })
       }
     );
 
@@ -349,9 +377,15 @@ app.get('/servicebon/search', async (req, res) => {
       return res.json(mapped);
     }
 
-    if (status === 200 && fmCode === '401') return res.json({ error: 'no matches' });
+    if (status === 200 && fmCode === '401') {
+      return res.json({ error: 'no matches' });
+    }
 
-    console.error('FileMaker find error in /servicebon/search:', status, JSON.stringify(json));
+    console.error(
+      'FileMaker find error in /servicebon/search:',
+      status,
+      JSON.stringify(json)
+    );
     return res.status(502).json({
       error: 'FileMaker response error',
       fmStatus: status,
@@ -375,9 +409,13 @@ app.get('/product/search', async (req, res) => {
   const category = (req.query.category || '').toString().trim();
 
   const limitReq = Number(req.query.limit || 50);
-  const limit = Number.isFinite(limitReq) ? Math.min(200, Math.max(1, limitReq)) : 50;
+  const limit = Number.isFinite(limitReq)
+    ? Math.min(200, Math.max(1, limitReq))
+    : 50;
 
-  if (!q) return res.status(400).json({ error: 'q (search term) is required' });
+  if (!q) {
+    return res.status(400).json({ error: 'q (search term) is required' });
+  }
 
   const wildcard = `*${q}*`;
 
@@ -408,7 +446,10 @@ app.get('/product/search', async (req, res) => {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ query: fmQuery, limit })
+        body: JSON.stringify({
+          query: fmQuery,
+          limit
+        })
       }
     );
 
@@ -416,36 +457,42 @@ app.get('/product/search', async (req, res) => {
 
     if (status === 200 && fmCode === '0') {
       const records = json?.response?.data || [];
-      return res.json(
-        records.map((rec) => {
-          const f = rec.fieldData || {};
-          return {
-            recordId: rec.recordId,
-            productNummerIntern: f.productNummerIntern ?? null,
-            productNummerLeverancier: f.productNummerLeverancier ?? null,
-            leverancierNaam: f.leverancierNaam ?? null,
-            productcategorie: f.productcategorie ?? null,
-            productgroep: f.productgroep ?? null,
-            omschrijvingKortNL: f.omschrijvingKortNL ?? null,
-            omschrijvingKortEN: f.omschrijvingKortEN ?? null,
-            omschrijvingKortDE: f.omschrijvingKortDE ?? null,
-            omschrijvingLang: f.omschrijvingLang ?? null,
-            merk: f.merk ?? null,
-            locatiecode: f.locatiecode ?? null,
-            inkoopprijs: f.inkoopprijs ?? null,
-            inkoopprijs_waarde: f.inkoopprijs_waarde ?? null,
-            voorraad: f['product_VOORRAAD::aantal'] ?? null,
-            voorraadRecordId: f['product_VOORRAAD::ID'] ?? null,
-            productId: f.ID ?? null,
-            voorraadProductId: f['product_VOORRAAD::id_product'] ?? null
-          };
-        })
-      );
+      const mapped = records.map((rec) => {
+        const f = rec.fieldData || {};
+        return {
+          recordId: rec.recordId,
+          productNummerIntern: f.productNummerIntern ?? null,
+          productNummerLeverancier: f.productNummerLeverancier ?? null,
+          leverancierNaam: f.leverancierNaam ?? null,
+          productcategorie: f.productcategorie ?? null,
+          productgroep: f.productgroep ?? null,
+          omschrijvingKortNL: f.omschrijvingKortNL ?? null,
+          omschrijvingKortEN: f.omschrijvingKortEN ?? null,
+          omschrijvingKortDE: f.omschrijvingKortDE ?? null,
+          omschrijvingLang: f.omschrijvingLang ?? null,
+          merk: f.merk ?? null,
+          locatiecode: f.locatiecode ?? null,
+          inkoopprijs: f.inkoopprijs ?? null,
+          inkoopprijs_waarde: f.inkoopprijs_waarde ?? null,
+          voorraad: f['product_VOORRAAD::aantal'] ?? null,
+          voorraadRecordId: f['product_VOORRAAD::ID'] ?? null,
+          productId: f.ID ?? null,
+          voorraadProductId: f['product_VOORRAAD::id_product'] ?? null
+        };
+      });
+
+      return res.json(mapped);
     }
 
-    if (status === 200 && fmCode === '401') return res.json({ error: 'no matches' });
+    if (status === 200 && fmCode === '401') {
+      return res.json({ error: 'no matches' });
+    }
 
-    console.error('FileMaker find error in /product/search:', status, JSON.stringify(json));
+    console.error(
+      'FileMaker find error in /product/search:',
+      status,
+      JSON.stringify(json)
+    );
     return res.status(502).json({
       error: 'FileMaker response error',
       fmStatus: status,
@@ -457,36 +504,38 @@ app.get('/product/search', async (req, res) => {
   }
 });
 
-// ✅ Preview via script (API_Servicebon_PREVIEW)
+// ✅ NIEUW: Preview via script (records endpoint) → script: API_Servicebon_PREVIEW
 app.post('/servicebon/preview', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
-    const r = await runScriptViaFind({
+    const { status, json } = await runScriptViaRecords({
       scriptName: 'API_Servicebon_PREVIEW',
       payloadObj: req.body,
-      layout: LAYOUT_SERVICEBON
+      layout: LAYOUT_SERVICEBON,
+      limit: 1
     });
 
-    return res.status(r.status).json(r.json);
+    return res.status(status).json(json);
   } catch (e) {
     console.error('Error in /servicebon/preview:', e);
     return res.status(500).json({ error: String(e.message || e) });
   }
 });
 
-// ✅ Receive via script (API_Servicebon_RECEIVE)
+// ✅ NIEUW: Receive via script (records endpoint) → script: API_Servicebon_RECEIVE
 app.post('/servicebon/receive', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
-    const r = await runScriptViaFind({
+    const { status, json } = await runScriptViaRecords({
       scriptName: 'API_Servicebon_RECEIVE',
       payloadObj: req.body,
-      layout: LAYOUT_SERVICEBON
+      layout: LAYOUT_SERVICEBON,
+      limit: 1
     });
 
-    return res.status(r.status).json(r.json);
+    return res.status(status).json(json);
   } catch (e) {
     console.error('Error in /servicebon/receive:', e);
     return res.status(500).json({ error: String(e.message || e) });
@@ -498,14 +547,16 @@ app.post('/fm/request', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
-    let { method, path, body, action, layout, recordId, fieldData } = req.body || {};
+    let { method, path, body, action, layout, recordId, fieldData } =
+      req.body || {};
 
     if (action === 'getLayouts') {
       method = 'GET';
       path = '/layouts';
     }
     if (action === 'getRecord') {
-      if (!layout || !recordId) return res.status(400).json({ error: 'layout/recordId required' });
+      if (!layout || !recordId)
+        return res.status(400).json({ error: 'layout/recordId required' });
       method = 'GET';
       path = `/layouts/${layout}/records/${recordId}`;
     }
@@ -515,13 +566,12 @@ app.post('/fm/request', async (req, res) => {
       body = { fieldData };
     }
 
-    if (!method || !path) return res.status(400).json({ error: 'method/path required' });
+    if (!method || !path)
+      return res.status(400).json({ error: 'method/path required' });
 
-    // ✅ allow both /layouts and /scripts (and future-safe: /productInfo)
-    const allowedPrefixes = ['/layouts', '/scripts', '/productInfo'];
-    if (!allowedPrefixes.some((p) => path.startsWith(p))) {
-      return res.status(400).json({ error: `path must start with ${allowedPrefixes.join(' or ')}` });
-    }
+    // bewust beperkt (zoals je had) — scripts/lijsten via Data API kan niet via /scripts anyway
+    if (!path.startsWith('/layouts'))
+      return res.status(400).json({ error: 'path must start with /layouts' });
 
     const token = await getToken();
 
