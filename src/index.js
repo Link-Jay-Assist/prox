@@ -55,6 +55,10 @@ let tokenExp = 0;
 // ✅ Hardcoded layout (zoals jij wil)
 const LAYOUT_SERVICEBON = 'REST_Servicebon';
 
+// ✅ NIEUW: default find criteria zodat je NOOIT “Find criteria are empty” krijgt
+// (gebruik een veld dat altijd bestaat; jij hebt g_api_enabled op de layout)
+const DEFAULT_FIND_CRITERIA = { g_api_enabled: '*' };
+
 // ---------- GENERIEKE FETCH HELPER ----------
 async function jsonFetch(url, opts = {}) {
   const r = await ureq(url, opts);
@@ -109,7 +113,11 @@ function okAuth(req) {
  * ✅ Script runner via: GET /records?_limit=1&script=...&script.param=...
  * Dit is de “werkt altijd” methode (jij gebruikte dit al met fm/request).
  */
-async function runScriptViaRecords({ scriptName, payloadObj, layout = LAYOUT_SERVICEBON }) {
+async function runScriptViaRecords({
+  scriptName,
+  payloadObj,
+  layout = LAYOUT_SERVICEBON
+}) {
   if (!scriptName) throw new Error('scriptName is required');
 
   const token = await getToken();
@@ -146,6 +154,58 @@ async function runScriptViaRecords({ scriptName, payloadObj, layout = LAYOUT_SER
   return r; // {status, json}
 }
 
+/**
+ * ✅ NIEUW: Script runner via _find (POST) met “niet-lege” criteria + script.param
+ * Handig als je later wil switchen (en lost “Find criteria are empty” op).
+ *
+ * LET OP: g_api_enabled bestaat bij jou zeker op de layout REST_Servicebon.
+ */
+async function runScriptViaFind({
+  scriptName,
+  payloadObj,
+  layout = LAYOUT_SERVICEBON,
+  findCriteria = DEFAULT_FIND_CRITERIA,
+  limit = 1
+}) {
+  if (!scriptName) throw new Error('scriptName is required');
+
+  const token = await getToken();
+
+  const payloadString = JSON.stringify(
+    payloadObj && typeof payloadObj === 'object' ? payloadObj : {}
+  );
+
+  const url =
+    `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}` +
+    `/layouts/${encodeURIComponent(layout)}/_find`;
+
+  const bodyObj = {
+    query: [findCriteria || DEFAULT_FIND_CRITERIA],
+    limit: Math.max(1, Number(limit) || 1),
+    script: scriptName,
+    'script.param': payloadString
+  };
+
+  const call = async (tok) =>
+    jsonFetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${tok}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(bodyObj)
+    });
+
+  let r = await call(token);
+
+  if (r.status === 401) {
+    cachedToken = null;
+    r = await call(await getToken());
+  }
+
+  return r; // {status, json}
+}
+
 // ---------- ROUTES ----------
 app.get('/health', (_, res) => res.type('text/plain').send('OK'));
 
@@ -156,7 +216,12 @@ app.get('/test', async (req, res) => {
     const html = await response.text();
     res
       .status(200)
-      .send(`Connected!<br>Status: ${response.status}<br><pre>${html.substring(0, 300)}...</pre>`);
+      .send(
+        `Connected!<br>Status: ${response.status}<br><pre>${html.substring(
+          0,
+          300
+        )}...</pre>`
+      );
   } catch (err) {
     res.status(500).send(`Connection failed: ${err.message}`);
   }
@@ -184,7 +249,8 @@ app.get('/whois-ip', async (req, res) => {
           if (ip) return res.json({ ip });
         } catch {
           const cand = text.trim();
-          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand)) return res.json({ ip: cand });
+          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand))
+            return res.json({ ip: cand });
         }
       } catch {}
     }
@@ -242,7 +308,11 @@ app.get('/debiteur/search', async (req, res) => {
     }
 
     if (!(status === 200 && fmCode === '401')) {
-      console.error('FileMaker error in baseQuery:', status, JSON.stringify(json));
+      console.error(
+        'FileMaker error in baseQuery:',
+        status,
+        JSON.stringify(json)
+      );
       return res.status(502).json({ error: 'no matches' });
     }
 
@@ -270,9 +340,14 @@ app.get('/debiteur/search', async (req, res) => {
       );
     }
 
-    if (status === 200 && fmCode === '401') return res.json({ error: 'no matches' });
+    if (status === 200 && fmCode === '401')
+      return res.json({ error: 'no matches' });
 
-    console.error('FileMaker error in addressQuery:', status, JSON.stringify(json));
+    console.error(
+      'FileMaker error in addressQuery:',
+      status,
+      JSON.stringify(json)
+    );
     return res.json({ error: 'no matches' });
   } catch (err) {
     console.error('Error in /debiteur/search:', err);
@@ -354,9 +429,14 @@ app.get('/servicebon/search', async (req, res) => {
       return res.json(mapped);
     }
 
-    if (status === 200 && fmCode === '401') return res.json({ error: 'no matches' });
+    if (status === 200 && fmCode === '401')
+      return res.json({ error: 'no matches' });
 
-    console.error('FileMaker find error in /servicebon/search:', status, JSON.stringify(json));
+    console.error(
+      'FileMaker find error in /servicebon/search:',
+      status,
+      JSON.stringify(json)
+    );
     return res.status(502).json({
       error: 'FileMaker response error',
       fmStatus: status,
@@ -380,7 +460,9 @@ app.get('/product/search', async (req, res) => {
   const category = (req.query.category || '').toString().trim();
 
   const limitReq = Number(req.query.limit || 50);
-  const limit = Number.isFinite(limitReq) ? Math.min(200, Math.max(1, limitReq)) : 50;
+  const limit = Number.isFinite(limitReq)
+    ? Math.min(200, Math.max(1, limitReq))
+    : 50;
 
   if (!q) return res.status(400).json({ error: 'q (search term) is required' });
 
@@ -448,9 +530,14 @@ app.get('/product/search', async (req, res) => {
       );
     }
 
-    if (status === 200 && fmCode === '401') return res.json({ error: 'no matches' });
+    if (status === 200 && fmCode === '401')
+      return res.json({ error: 'no matches' });
 
-    console.error('FileMaker find error in /product/search:', status, JSON.stringify(json));
+    console.error(
+      'FileMaker find error in /product/search:',
+      status,
+      JSON.stringify(json)
+    );
     return res.status(502).json({
       error: 'FileMaker response error',
       fmStatus: status,
@@ -467,6 +554,8 @@ app.post('/servicebon/preview', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
+    // ✅ je kunt óf records (werkt altijd) óf find gebruiken.
+    // Laat ‘m op records staan (jouw huidige setup).
     const { status, json } = await runScriptViaRecords({
       scriptName: 'API_Servicebon_PREVIEW',
       payloadObj: req.body,
@@ -485,6 +574,8 @@ app.post('/servicebon/receive', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
+    // ✅ je kunt óf records (werkt altijd) óf find gebruiken.
+    // Als je ooit weer “Find criteria are empty” ziet: switch naar runScriptViaFind.
     const { status, json } = await runScriptViaRecords({
       scriptName: 'API_Servicebon_RECEIVE',
       payloadObj: req.body,
@@ -503,14 +594,16 @@ app.post('/fm/request', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
-    let { method, path, body, action, layout, recordId, fieldData } = req.body || {};
+    let { method, path, body, action, layout, recordId, fieldData } =
+      req.body || {};
 
     if (action === 'getLayouts') {
       method = 'GET';
       path = '/layouts';
     }
     if (action === 'getRecord') {
-      if (!layout || !recordId) return res.status(400).json({ error: 'layout/recordId required' });
+      if (!layout || !recordId)
+        return res.status(400).json({ error: 'layout/recordId required' });
       method = 'GET';
       path = `/layouts/${layout}/records/${recordId}`;
     }
@@ -520,8 +613,12 @@ app.post('/fm/request', async (req, res) => {
       body = { fieldData };
     }
 
-    if (!method || !path) return res.status(400).json({ error: 'method/path required' });
-    if (!path.startsWith('/layouts')) return res.status(400).json({ error: 'path must start with /layouts' });
+    if (!method || !path)
+      return res.status(400).json({ error: 'method/path required' });
+    if (!path.startsWith('/layouts'))
+      return res
+        .status(400)
+        .json({ error: 'path must start with /layouts' });
 
     const token = await getToken();
 
