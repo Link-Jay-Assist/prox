@@ -355,6 +355,74 @@ app.get('/debiteur/search', async (req, res) => {
   }
 });
 
+/* 🏠 Debiteur adres ophalen (bezoek > factuur > eerste beschikbaar) */
+app.get('/debiteur/address', async (req, res) => {
+  const debiteurNummer = (req.query.debiteurNummer || '').toString().trim();
+  if (!debiteurNummer) {
+    return res.status(400).json({ error: 'debiteurNummer is required' });
+  }
+
+  try {
+    const token = await getToken();
+
+    const { status, json } = await jsonFetch(
+      `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Debiteur_Rest/_find`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          query: [{ debiteurNummer }],
+          limit: 1
+        })
+      }
+    );
+
+    const fmCode = json?.messages?.[0]?.code;
+    if (status !== 200 || fmCode !== '0') {
+      return res.json({ address: null });
+    }
+
+    const rec = json.response?.data?.[0];
+    const fieldData = rec?.fieldData || {};
+    const portals = rec?.portalData?.debiteur_ADRESSEN || [];
+
+    if (!portals.length) {
+      return res.json({
+        debiteurNummer: fieldData.debiteurNummer ?? null,
+        debiteurNaam: fieldData.debiteurNaam ?? null,
+        address: null
+      });
+    }
+
+    const pick = (type) =>
+      portals.find((p) => p['debiteur_ADRESSEN::adresType'] === type);
+
+    const bezoek = pick('bezoek');
+    const factuur = pick('factuur');
+    const chosen = bezoek || factuur || portals[0];
+
+    return res.json({
+      debiteurNummer: fieldData.debiteurNummer ?? null,
+      debiteurNaam: fieldData.debiteurNaam ?? null,
+      address: {
+        type: chosen['debiteur_ADRESSEN::adresType'] ?? null,
+        straat: chosen['debiteur_ADRESSEN::straat'] ?? null,
+        huisnummer: chosen['debiteur_ADRESSEN::huisnummer'] ?? null,
+        toevoeging: chosen['debiteur_ADRESSEN::toevoeging'] ?? null,
+        postcode: chosen['debiteur_ADRESSEN::postcode'] ?? null,
+        plaats: chosen['debiteur_ADRESSEN::plaats'] ?? null,
+        land: chosen['debiteur_ADRESSEN::land'] ?? null
+      }
+    });
+  } catch (err) {
+    console.error('Error in /debiteur/address:', err);
+    return res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
 /* 🔍 Servicebon zoeken (Servicebon_Rest) – uitgebreide versie */
 app.get('/servicebon/search', async (req, res) => {
   const qRaw = (req.query.q || '').toString();
@@ -554,8 +622,6 @@ app.post('/servicebon/preview', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
-    // ✅ je kunt óf records (werkt altijd) óf find gebruiken.
-    // Laat ‘m op records staan (jouw huidige setup).
     const { status, json } = await runScriptViaRecords({
       scriptName: 'API_Servicebon_PREVIEW',
       payloadObj: req.body,
@@ -574,8 +640,6 @@ app.post('/servicebon/receive', async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
-    // ✅ je kunt óf records (werkt altijd) óf find gebruiken.
-    // Als je ooit weer “Find criteria are empty” ziet: switch naar runScriptViaFind.
     const { status, json } = await runScriptViaRecords({
       scriptName: 'API_Servicebon_RECEIVE',
       payloadObj: req.body,
