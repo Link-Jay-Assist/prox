@@ -1,3 +1,4 @@
+// src/index.js
 import "dotenv/config";
 import express from "express";
 import helmet from "helmet";
@@ -20,8 +21,7 @@ setGlobalDispatcher(
 );
 
 /**
- * SECURITY: TLS bypass UIT
- * (FileMaker heeft nu geldig cert, dus dit hoort weg)
+ * SECURITY: TLS bypass UIT (FileMaker heeft geldig cert)
  */
 // process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
@@ -79,6 +79,46 @@ const LAYOUT_SERVICEBON = "REST_Servicebon";
 
 // ✅ default find criteria zodat je NOOIT “Find criteria are empty” krijgt
 const DEFAULT_FIND_CRITERIA = { g_api_enabled: "*" };
+
+/**
+ * =========================
+ * /fm/request WHITELIST
+ * =========================
+ * Layouts die jij noemde als "gebruikt".
+ * (Alles erbuiten wordt 403)
+ */
+const FM_ALLOWED = {
+  Debiteur_Rest: new Set(["_find", "records"]),
+  REST_Installaties: new Set(["_find", "records"]),
+  REST_Servicecontracten: new Set(["_find", "records"]),
+  REST_Project: new Set(["_find", "records"]),
+  REST_Crediteur: new Set(["_find", "records"]),
+  Productprijs_rest: new Set(["_find", "records"]),
+  REST_Inkooporder: new Set(["_find", "records"]), // create/update via records (POST/PATCH)
+  REST_InkooporderRegel: new Set(["_find", "records"]),
+  // deze gebruik je ook in je eigen routes:
+  Product_rest: new Set(["_find", "records"]),
+  Servicebon_Rest: new Set(["_find", "records"]),
+  REST_Servicebon: new Set(["_find", "records"]),
+};
+
+const ALLOWED_METHODS = new Set(["GET", "POST", "PATCH"]); // strak houden (geen DELETE)
+
+/** parse /layouts/<layout>/<action> */
+function parseLayoutAndAction(path) {
+  const m = String(path).match(/^\/layouts\/([^/]+)\/([^/?#]+)/);
+  if (!m) return null;
+  return { layout: decodeURIComponent(m[1]), action: decodeURIComponent(m[2]) };
+}
+
+function isLayoutAllowed(layout) {
+  return !!FM_ALLOWED[layout];
+}
+
+function isActionAllowed(layout, action) {
+  const set = FM_ALLOWED[layout];
+  return !!set && set.has(action);
+}
 
 // ---------- GENERIEKE FETCH HELPER (met timeout, zelfde output) ----------
 async function jsonFetch(url, opts = {}) {
@@ -140,25 +180,18 @@ function okAuth(req) {
   const s = (req.header("X-Webhook-Secret") || "").trim();
   const b = (req.header("Authorization") || "").trim();
   const bearer = b.startsWith("Bearer ") ? b.slice(7).trim() : "";
-
   return safeEq(s, API_SECRET) || safeEq(bearer, API_SECRET);
 }
 
 /**
  * ✅ Script runner via records (GET) – jouw “werkt altijd”
  */
-async function runScriptViaRecords({
-  scriptName,
-  payloadObj,
-  layout = LAYOUT_SERVICEBON,
-}) {
+async function runScriptViaRecords({ scriptName, payloadObj, layout = LAYOUT_SERVICEBON }) {
   if (!scriptName) throw new Error("scriptName is required");
 
   const token = await getToken();
 
-  const payloadString = JSON.stringify(
-    payloadObj && typeof payloadObj === "object" ? payloadObj : {}
-  );
+  const payloadString = JSON.stringify(payloadObj && typeof payloadObj === "object" ? payloadObj : {});
 
   const url =
     `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}` +
@@ -198,9 +231,7 @@ async function runScriptViaFind({
 
   const token = await getToken();
 
-  const payloadString = JSON.stringify(
-    payloadObj && typeof payloadObj === "object" ? payloadObj : {}
-  );
+  const payloadString = JSON.stringify(payloadObj && typeof payloadObj === "object" ? payloadObj : {});
 
   const url =
     `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}` +
@@ -232,9 +263,9 @@ async function runScriptViaFind({
 }
 
 // ---------- ROUTES ----------
-app.get("/health", (_, res) => res.type("text/plain").send("OK"));
+app.get("/health", (_req, res) => res.type("text/plain").send("OK"));
 
-/* 🧪 TEST ROUTE — check outbound connectivity */
+/* 🧪 TEST ROUTE — zet in praktijk liever achter auth of uit in prod */
 app.get("/test", async (_req, res) => {
   try {
     const response = await fetch("https://www.google.com");
@@ -242,17 +273,14 @@ app.get("/test", async (_req, res) => {
     res
       .status(200)
       .send(
-        `Connected!<br>Status: ${response.status}<br><pre>${html.substring(
-          0,
-          300
-        )}...</pre>`
+        `Connected!<br>Status: ${response.status}<br><pre>${html.substring(0, 300)}...</pre>`
       );
   } catch (err) {
     res.status(500).send(`Connection failed: ${err.message}`);
   }
 });
 
-/* 🌐 GET public IP */
+/* 🌐 GET public IP (achter auth) */
 app.get("/whois-ip", async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: "unauthorized" });
@@ -274,8 +302,7 @@ app.get("/whois-ip", async (req, res) => {
           if (ip) return res.json({ ip });
         } catch {
           const cand = text.trim();
-          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand))
-            return res.json({ ip: cand });
+          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand)) return res.json({ ip: cand });
         }
       } catch {}
     }
@@ -286,10 +313,9 @@ app.get("/whois-ip", async (req, res) => {
   }
 });
 
-/* 🔍 Debiteur zoeken (ZOEKSTUK TERUG ZOALS HET WAS) */
+/* 🔍 Debiteur zoeken (FIX: numeriek exact match, dus 3300 != alles met 3xxx) */
 app.get("/debiteur/search", async (req, res) => {
-  const qRaw = (req.query.q || "").toString();
-  const q = qRaw.trim();
+  const q = String(req.query.q || "").trim();
   if (!q) return res.status(400).json({ error: "q (search term) is required" });
 
   const isNumeric = /^[0-9]+$/.test(q);
@@ -298,10 +324,10 @@ app.get("/debiteur/search", async (req, res) => {
   try {
     const token = await getToken();
 
-    // ✅ TERUG: exact dezelfde query-opbouw als je originele versie
-    // (dus debiteurNummer: q zonder '==')
+    // ✅ Exact match voor debiteurNummer
+    // FileMaker find: '==3300' is exact, '3300' kan prefix/partial geven afhankelijk van field/index
     const baseQuery = [];
-    if (isNumeric) baseQuery.push({ debiteurNummer: q });
+    if (isNumeric) baseQuery.push({ debiteurNummer: `==${q}` });
     baseQuery.push({ debiteurNaam: wildcard });
 
     const callFind = async (query) =>
@@ -333,12 +359,9 @@ app.get("/debiteur/search", async (req, res) => {
       );
     }
 
+    // geen matches => probeer adres portal search
     if (!(status === 200 && fmCode === "401")) {
-      console.error(
-        "FileMaker error in baseQuery:",
-        status,
-        JSON.stringify(json)
-      );
+      console.error("FileMaker error in baseQuery:", status, JSON.stringify(json));
       return res.status(502).json({ error: "no matches" });
     }
 
@@ -366,14 +389,9 @@ app.get("/debiteur/search", async (req, res) => {
       );
     }
 
-    if (status === 200 && fmCode === "401")
-      return res.json({ error: "no matches" });
+    if (status === 200 && fmCode === "401") return res.json({ error: "no matches" });
 
-    console.error(
-      "FileMaker error in addressQuery:",
-      status,
-      JSON.stringify(json)
-    );
+    console.error("FileMaker error in addressQuery:", status, JSON.stringify(json));
     return res.json({ error: "no matches" });
   } catch (err) {
     console.error("Error in /debiteur/search:", err);
@@ -383,13 +401,13 @@ app.get("/debiteur/search", async (req, res) => {
 
 /* 🏠 Debiteur adres ophalen */
 app.get("/debiteur/address", async (req, res) => {
-  const debiteurNummer = (req.query.debiteurNummer || "").toString().trim();
-  if (!debiteurNummer)
-    return res.status(400).json({ error: "debiteurNummer is required" });
+  const debiteurNummer = String(req.query.debiteurNummer || "").trim();
+  if (!debiteurNummer) return res.status(400).json({ error: "debiteurNummer is required" });
 
   try {
     const token = await getToken();
 
+    // ✅ ook hier exact match
     const { status, json } = await jsonFetch(
       `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Debiteur_Rest/_find`,
       {
@@ -399,7 +417,7 @@ app.get("/debiteur/address", async (req, res) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          query: [{ debiteurNummer }],
+          query: [{ debiteurNummer: `==${debiteurNummer}` }],
           limit: 1,
         }),
       }
@@ -420,9 +438,7 @@ app.get("/debiteur/address", async (req, res) => {
       });
     }
 
-    const pick = (type) =>
-      portals.find((p) => p["debiteur_ADRESSEN::adresType"] === type);
-
+    const pick = (type) => portals.find((p) => p["debiteur_ADRESSEN::adresType"] === type);
     const bezoek = pick("bezoek");
     const factuur = pick("factuur");
     const chosen = bezoek || factuur || portals[0];
@@ -448,8 +464,7 @@ app.get("/debiteur/address", async (req, res) => {
 
 /* 🔍 Servicebon zoeken */
 app.get("/servicebon/search", async (req, res) => {
-  const qRaw = (req.query.q || "").toString();
-  const q = qRaw.trim();
+  const q = String(req.query.q || "").trim();
   if (!q) return res.status(400).json({ error: "q (search term) is required" });
 
   const wildcard = `*${q}*`;
@@ -521,11 +536,7 @@ app.get("/servicebon/search", async (req, res) => {
 
     if (status === 200 && fmCode === "401") return res.json({ error: "no matches" });
 
-    console.error(
-      "FileMaker find error in /servicebon/search:",
-      status,
-      JSON.stringify(json)
-    );
+    console.error("FileMaker find error in /servicebon/search:", status, JSON.stringify(json));
     return res.status(502).json({
       error: "FileMaker response error",
       fmStatus: status,
@@ -539,19 +550,15 @@ app.get("/servicebon/search", async (req, res) => {
 
 /* 🔍 Product zoeken */
 app.get("/product/search", async (req, res) => {
-  const qRaw = (req.query.q || "").toString();
-  const q = qRaw.trim();
+  const q = String(req.query.q || "").trim();
 
   const onlyStock =
-    String(req.query.onlyStock || "").toLowerCase() === "true" ||
-    String(req.query.onlyStock || "") === "1";
+    String(req.query.onlyStock || "").toLowerCase() === "true" || String(req.query.onlyStock || "") === "1";
 
-  const category = (req.query.category || "").toString().trim();
+  const category = String(req.query.category || "").trim();
 
   const limitReq = Number(req.query.limit || 50);
-  const limit = Number.isFinite(limitReq)
-    ? Math.min(200, Math.max(1, limitReq))
-    : 50;
+  const limit = Number.isFinite(limitReq) ? Math.min(200, Math.max(1, limitReq)) : 50;
 
   if (!q) return res.status(400).json({ error: "q (search term) is required" });
 
@@ -621,11 +628,7 @@ app.get("/product/search", async (req, res) => {
 
     if (status === 200 && fmCode === "401") return res.json({ error: "no matches" });
 
-    console.error(
-      "FileMaker find error in /product/search:",
-      status,
-      JSON.stringify(json)
-    );
+    console.error("FileMaker find error in /product/search:", status, JSON.stringify(json));
     return res.status(502).json({
       error: "FileMaker response error",
       fmStatus: status,
@@ -673,41 +676,69 @@ app.post("/servicebon/receive", async (req, res) => {
   }
 });
 
-// ---------- HOOFDENDPOINT /fm/request (AUTH + minimale hardening) ----------
-const ALLOWED_METHODS = new Set(["GET", "POST", "PATCH", "DELETE"]);
-
+// ---------- HOOFDENDPOINT /fm/request (AUTH + WHITELIST) ----------
 app.post("/fm/request", async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: "unauthorized" });
 
     let { method, path, body, action, layout, recordId, fieldData } = req.body || {};
 
+    // convenience actions
     if (action === "getLayouts") {
       method = "GET";
       path = "/layouts";
     }
+
     if (action === "getRecord") {
       if (!layout || !recordId) return res.status(400).json({ error: "layout/recordId required" });
+      if (!isLayoutAllowed(layout)) return res.status(403).json({ error: "layout not allowed" });
       method = "GET";
-      path = `/layouts/${layout}/records/${recordId}`;
+      path = `/layouts/${encodeURIComponent(layout)}/records/${encodeURIComponent(String(recordId))}`;
     }
+
     if (action === "createRecord") {
+      if (!layout) return res.status(400).json({ error: "layout required" });
+      if (!isLayoutAllowed(layout)) return res.status(403).json({ error: "layout not allowed" });
       method = "POST";
-      path = `/layouts/${layout}/records`;
-      body = { fieldData };
+      path = `/layouts/${encodeURIComponent(layout)}/records`;
+      body = { fieldData: fieldData || {} };
     }
 
     if (!method || !path) return res.status(400).json({ error: "method/path required" });
+
     method = String(method).toUpperCase();
     if (!ALLOWED_METHODS.has(method)) return res.status(400).json({ error: "method not allowed" });
 
-    if (!path.startsWith("/layouts")) return res.status(400).json({ error: "path must start with /layouts" });
+    // allow only /layouts... or /layouts itself
+    if (!String(path).startsWith("/layouts")) {
+      return res.status(400).json({ error: "path must start with /layouts" });
+    }
+
+    // prevent querystring injection
     if (path.includes("?")) return res.status(400).json({ error: "querystring not allowed in path" });
+
+    // If someone calls /layouts (list layouts), allow (still behind auth)
+    if (path === "/layouts") {
+      if (method !== "GET") return res.status(400).json({ error: "method not allowed for /layouts" });
+    } else {
+      // enforce allowlist for /layouts/<layout>/<action>
+      const parsed = parseLayoutAndAction(path);
+      if (!parsed) return res.status(400).json({ error: "invalid path" });
+
+      if (!isLayoutAllowed(parsed.layout)) return res.status(403).json({ error: "layout not allowed" });
+      if (!isActionAllowed(parsed.layout, parsed.action))
+        return res.status(403).json({ error: "action not allowed for layout" });
+
+      // extra safety: block record creation if you ever want (zet aan indien nodig)
+      // if (parsed.action === "records" && method === "POST" && !action) {
+      //   return res.status(403).json({ error: "creating records not allowed" });
+      // }
+    }
 
     const token = await getToken();
 
     const callFM = async (tok) =>
-      jsonFetch(`${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}${path}`, {
+      jsonFetch(`${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}${path}`, {
         method,
         headers: {
           Authorization: `Bearer ${tok}`,
