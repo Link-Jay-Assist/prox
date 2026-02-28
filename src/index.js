@@ -21,7 +21,7 @@ setGlobalDispatcher(
 
 /**
  * SECURITY: TLS bypass UIT
- * (Je zegt dat FileMaker nu een geldig cert heeft, dus dit hoort weg)
+ * (FileMaker heeft nu geldig cert, dus dit hoort weg)
  */
 // process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
@@ -119,7 +119,6 @@ async function getToken() {
   );
 
   if (status !== 200 || !json?.response?.token) {
-    // security: log niet de hele response (kan PII bevatten)
     const msg = json?.messages?.[0]?.message || "unknown";
     throw new Error(`FM login failed: ${status} ${msg}`);
   }
@@ -148,12 +147,18 @@ function okAuth(req) {
 /**
  * ✅ Script runner via records (GET) – jouw “werkt altijd”
  */
-async function runScriptViaRecords({ scriptName, payloadObj, layout = LAYOUT_SERVICEBON }) {
+async function runScriptViaRecords({
+  scriptName,
+  payloadObj,
+  layout = LAYOUT_SERVICEBON,
+}) {
   if (!scriptName) throw new Error("scriptName is required");
 
   const token = await getToken();
 
-  const payloadString = JSON.stringify(payloadObj && typeof payloadObj === "object" ? payloadObj : {});
+  const payloadString = JSON.stringify(
+    payloadObj && typeof payloadObj === "object" ? payloadObj : {}
+  );
 
   const url =
     `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}` +
@@ -172,12 +177,10 @@ async function runScriptViaRecords({ scriptName, payloadObj, layout = LAYOUT_SER
     });
 
   let r = await call(token);
-
   if (r.status === 401) {
     cachedToken = null;
     r = await call(await getToken());
   }
-
   return r;
 }
 
@@ -195,7 +198,9 @@ async function runScriptViaFind({
 
   const token = await getToken();
 
-  const payloadString = JSON.stringify(payloadObj && typeof payloadObj === "object" ? payloadObj : {});
+  const payloadString = JSON.stringify(
+    payloadObj && typeof payloadObj === "object" ? payloadObj : {}
+  );
 
   const url =
     `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}` +
@@ -219,12 +224,10 @@ async function runScriptViaFind({
     });
 
   let r = await call(token);
-
   if (r.status === 401) {
     cachedToken = null;
     r = await call(await getToken());
   }
-
   return r;
 }
 
@@ -232,14 +235,17 @@ async function runScriptViaFind({
 app.get("/health", (_, res) => res.type("text/plain").send("OK"));
 
 /* 🧪 TEST ROUTE — check outbound connectivity */
-app.get("/test", async (req, res) => {
+app.get("/test", async (_req, res) => {
   try {
     const response = await fetch("https://www.google.com");
     const html = await response.text();
     res
       .status(200)
       .send(
-        `Connected!<br>Status: ${response.status}<br><pre>${html.substring(0, 300)}...</pre>`
+        `Connected!<br>Status: ${response.status}<br><pre>${html.substring(
+          0,
+          300
+        )}...</pre>`
       );
   } catch (err) {
     res.status(500).send(`Connection failed: ${err.message}`);
@@ -268,7 +274,8 @@ app.get("/whois-ip", async (req, res) => {
           if (ip) return res.json({ ip });
         } catch {
           const cand = text.trim();
-          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand)) return res.json({ ip: cand });
+          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand))
+            return res.json({ ip: cand });
         }
       } catch {}
     }
@@ -279,11 +286,10 @@ app.get("/whois-ip", async (req, res) => {
   }
 });
 
-/* 🔍 Debiteur zoeken */
+/* 🔍 Debiteur zoeken (ZOEKSTUK TERUG ZOALS HET WAS) */
 app.get("/debiteur/search", async (req, res) => {
   const qRaw = (req.query.q || "").toString();
   const q = qRaw.trim();
-
   if (!q) return res.status(400).json({ error: "q (search term) is required" });
 
   const isNumeric = /^[0-9]+$/.test(q);
@@ -292,19 +298,24 @@ app.get("/debiteur/search", async (req, res) => {
   try {
     const token = await getToken();
 
+    // ✅ TERUG: exact dezelfde query-opbouw als je originele versie
+    // (dus debiteurNummer: q zonder '==')
     const baseQuery = [];
     if (isNumeric) baseQuery.push({ debiteurNummer: q });
     baseQuery.push({ debiteurNaam: wildcard });
 
     const callFind = async (query) =>
-      jsonFetch(`${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Debiteur_Rest/_find`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ query, limit: 50 }),
-      });
+      jsonFetch(
+        `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Debiteur_Rest/_find`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ query, limit: 50 }),
+        }
+      );
 
     let { status, json } = await callFind(baseQuery);
     let fmCode = json?.messages?.[0]?.code;
@@ -323,7 +334,11 @@ app.get("/debiteur/search", async (req, res) => {
     }
 
     if (!(status === 200 && fmCode === "401")) {
-      console.error("FileMaker error in baseQuery:", status, JSON.stringify(json));
+      console.error(
+        "FileMaker error in baseQuery:",
+        status,
+        JSON.stringify(json)
+      );
       return res.status(502).json({ error: "no matches" });
     }
 
@@ -351,9 +366,14 @@ app.get("/debiteur/search", async (req, res) => {
       );
     }
 
-    if (status === 200 && fmCode === "401") return res.json({ error: "no matches" });
+    if (status === 200 && fmCode === "401")
+      return res.json({ error: "no matches" });
 
-    console.error("FileMaker error in addressQuery:", status, JSON.stringify(json));
+    console.error(
+      "FileMaker error in addressQuery:",
+      status,
+      JSON.stringify(json)
+    );
     return res.json({ error: "no matches" });
   } catch (err) {
     console.error("Error in /debiteur/search:", err);
@@ -361,12 +381,11 @@ app.get("/debiteur/search", async (req, res) => {
   }
 });
 
-/* 🏠 Debiteur adres ophalen (bezoek > factuur > eerste beschikbaar) */
+/* 🏠 Debiteur adres ophalen */
 app.get("/debiteur/address", async (req, res) => {
   const debiteurNummer = (req.query.debiteurNummer || "").toString().trim();
-  if (!debiteurNummer) {
+  if (!debiteurNummer)
     return res.status(400).json({ error: "debiteurNummer is required" });
-  }
 
   try {
     const token = await getToken();
@@ -387,9 +406,7 @@ app.get("/debiteur/address", async (req, res) => {
     );
 
     const fmCode = json?.messages?.[0]?.code;
-    if (status !== 200 || fmCode !== "0") {
-      return res.json({ address: null });
-    }
+    if (status !== 200 || fmCode !== "0") return res.json({ address: null });
 
     const rec = json.response?.data?.[0];
     const fieldData = rec?.fieldData || {};
@@ -403,7 +420,8 @@ app.get("/debiteur/address", async (req, res) => {
       });
     }
 
-    const pick = (type) => portals.find((p) => p["debiteur_ADRESSEN::adresType"] === type);
+    const pick = (type) =>
+      portals.find((p) => p["debiteur_ADRESSEN::adresType"] === type);
 
     const bezoek = pick("bezoek");
     const factuur = pick("factuur");
@@ -428,11 +446,10 @@ app.get("/debiteur/address", async (req, res) => {
   }
 });
 
-/* 🔍 Servicebon zoeken (Servicebon_Rest) */
+/* 🔍 Servicebon zoeken */
 app.get("/servicebon/search", async (req, res) => {
   const qRaw = (req.query.q || "").toString();
   const q = qRaw.trim();
-
   if (!q) return res.status(400).json({ error: "q (search term) is required" });
 
   const wildcard = `*${q}*`;
@@ -504,7 +521,11 @@ app.get("/servicebon/search", async (req, res) => {
 
     if (status === 200 && fmCode === "401") return res.json({ error: "no matches" });
 
-    console.error("FileMaker find error in /servicebon/search:", status, JSON.stringify(json));
+    console.error(
+      "FileMaker find error in /servicebon/search:",
+      status,
+      JSON.stringify(json)
+    );
     return res.status(502).json({
       error: "FileMaker response error",
       fmStatus: status,
@@ -516,18 +537,21 @@ app.get("/servicebon/search", async (req, res) => {
   }
 });
 
-/* 🔍 Product zoeken (Product_rest) */
+/* 🔍 Product zoeken */
 app.get("/product/search", async (req, res) => {
   const qRaw = (req.query.q || "").toString();
   const q = qRaw.trim();
 
   const onlyStock =
-    String(req.query.onlyStock || "").toLowerCase() === "true" || String(req.query.onlyStock || "") === "1";
+    String(req.query.onlyStock || "").toLowerCase() === "true" ||
+    String(req.query.onlyStock || "") === "1";
 
   const category = (req.query.category || "").toString().trim();
 
   const limitReq = Number(req.query.limit || 50);
-  const limit = Number.isFinite(limitReq) ? Math.min(200, Math.max(1, limitReq)) : 50;
+  const limit = Number.isFinite(limitReq)
+    ? Math.min(200, Math.max(1, limitReq))
+    : 50;
 
   if (!q) return res.status(400).json({ error: "q (search term) is required" });
 
@@ -597,7 +621,11 @@ app.get("/product/search", async (req, res) => {
 
     if (status === 200 && fmCode === "401") return res.json({ error: "no matches" });
 
-    console.error("FileMaker find error in /product/search:", status, JSON.stringify(json));
+    console.error(
+      "FileMaker find error in /product/search:",
+      status,
+      JSON.stringify(json)
+    );
     return res.status(502).json({
       error: "FileMaker response error",
       fmStatus: status,
@@ -674,8 +702,6 @@ app.post("/fm/request", async (req, res) => {
     if (!ALLOWED_METHODS.has(method)) return res.status(400).json({ error: "method not allowed" });
 
     if (!path.startsWith("/layouts")) return res.status(400).json({ error: "path must start with /layouts" });
-
-    // minimal hardening: geen querystring inject via path
     if (path.includes("?")) return res.status(400).json({ error: "querystring not allowed in path" });
 
     const token = await getToken();
