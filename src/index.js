@@ -656,7 +656,7 @@ app.post("/servicebon/receive", async (req, res) => {
     console.log("[servicebon/receive] payload bytes:", Buffer.byteLength(payloadString, "utf8"));
 
     const { status, json } = await runScriptViaFind({
-      scriptName: "API_Servicebon_RECEIVE_TEST",
+      scriptName: "API_Servicebon_MINTEST",
       payloadObj: req.body,
       layout: LAYOUT_SERVICEBON,
       findCriteria: DEFAULT_FIND_CRITERIA,
