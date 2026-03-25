@@ -652,11 +652,16 @@ app.post("/servicebon/receive", async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: "unauthorized" });
 
+    // 👇 NIEUW
+    console.log("========== RECEIVE REQUEST ==========");
+    console.log("BODY =", JSON.stringify(req.body, null, 2));
+    console.log("DEFAULT_FIND_CRITERIA =", DEFAULT_FIND_CRITERIA);
+
     const payloadString = JSON.stringify(req.body || {});
     console.log("[servicebon/receive] payload bytes:", Buffer.byteLength(payloadString, "utf8"));
 
     const { status, json } = await runScriptViaFind({
-      scriptName: "API_Servicebon_MINTEST",
+      scriptName: "API_Servicebon_RECEIVE",
       payloadObj: req.body,
       layout: LAYOUT_SERVICEBON,
       findCriteria: DEFAULT_FIND_CRITERIA,
