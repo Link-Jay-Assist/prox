@@ -692,6 +692,7 @@ const FM_LAYOUT_WHITELIST = new Map([
   ["Product_rest", new Set(["_find", "records"])],
   ["Servicebon_Rest", new Set(["_find", "records"])],
   ["REST_Servicebon", new Set(["_find", "records"])],
+  ["REST_ServicebonRegel", new Set(["_find", "records"])],
 ]);
 
 function parseLayoutAndAction(path) {
