@@ -633,7 +633,7 @@ app.post("/servicebon/preview", async (req, res) => {
     console.log("[servicebon/preview] payload bytes:", Buffer.byteLength(payloadString, "utf8"));
 
     const { status, json } = await runScriptViaFind({
-      scriptName: "API_Servicebon_PREVIEW",
+      scriptName: "API_Servicebon_PREVIEW_TEST",
       payloadObj: req.body,
       layout: LAYOUT_SERVICEBON,
       findCriteria: DEFAULT_FIND_CRITERIA,
