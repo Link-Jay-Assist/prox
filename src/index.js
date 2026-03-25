@@ -8,7 +8,7 @@ import { RateLimiterMemory } from "rate-limiter-flexible";
 import { request as ureq, fetch, Agent, setGlobalDispatcher } from "undici";
 
 /**
- * PERF: keep-alive / connection pooling (sneller, zelfde werking)
+ * PERF: keep-alive / connection pooling
  */
 setGlobalDispatcher(
   new Agent({
@@ -21,7 +21,7 @@ setGlobalDispatcher(
 
 /**
  * SECURITY: TLS bypass UIT
- * (FileMaker heeft nu geldig cert, dus dit hoort weg)
+ * Alleen inschakelen voor tijdelijke test, niet in productie
  */
 // process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
@@ -45,14 +45,15 @@ if (!API_SECRET || !FM_HOST || !FM_DB || !FM_USER || !FM_PASS) {
 const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", Math.max(0, parseInt(TRUST_PROXY_HOPS, 10) || 1));
+
 app.use(
   helmet({
     contentSecurityPolicy: false,
   })
 );
+
 app.use(express.json({ limit: "10mb" }));
 
-// ⭐ CORS – meerdere origins via komma-gescheiden lijst in ALLOW_ORIGIN
 app.use(
   cors({
     origin: ALLOW_ORIGIN ? ALLOW_ORIGIN.split(",").map((s) => s.trim()) : true,
@@ -74,13 +75,10 @@ app.use(async (req, res, next) => {
 let cachedToken = null;
 let tokenExp = 0;
 
-// ✅ Hardcoded layout (zoals jij wil)
 const LAYOUT_SERVICEBON = "REST_Servicebon";
-
-// ✅ default find criteria zodat je NOOIT “Find criteria are empty” krijgt
 const DEFAULT_FIND_CRITERIA = { g_api_enabled: "*" };
 
-// ---------- GENERIEKE FETCH HELPER (met timeout, zelfde output) ----------
+// ---------- GENERIEKE FETCH HELPER ----------
 async function jsonFetch(url, opts = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25_000);
@@ -99,7 +97,7 @@ async function jsonFetch(url, opts = {}) {
   }
 }
 
-// ---------- FILEMAKER TOKEN OPHALEN ----------
+// ---------- FILEMAKER TOKEN ----------
 async function getToken() {
   const now = Date.now();
   if (cachedToken && now < tokenExp) return cachedToken;
@@ -128,7 +126,7 @@ async function getToken() {
   return cachedToken;
 }
 
-// ---------- AUTH HELPER (timing-safe) ----------
+// ---------- AUTH HELPER ----------
 function safeEq(a, b) {
   if (typeof a !== "string" || typeof b !== "string") return false;
   const ab = Buffer.from(a);
@@ -140,12 +138,27 @@ function okAuth(req) {
   const s = (req.header("X-Webhook-Secret") || "").trim();
   const b = (req.header("Authorization") || "").trim();
   const bearer = b.startsWith("Bearer ") ? b.slice(7).trim() : "";
-
   return safeEq(s, API_SECRET) || safeEq(bearer, API_SECRET);
 }
 
+// ---------- FILEMAKER CALL HELPER MET 401 RETRY ----------
+async function withTokenRetry(makeCall) {
+  let token = await getToken();
+  let result = await makeCall(token);
+
+  if (result.status === 401) {
+    cachedToken = null;
+    token = await getToken();
+    result = await makeCall(token);
+  }
+
+  return result;
+}
+
 /**
- * ✅ Script runner via records (GET) – jouw “werkt altijd”
+ * Script runner via records (GET)
+ * Let op: gebruikt script.param in querystring
+ * Handig voor kleine payloads, minder geschikt voor grote payloads
  */
 async function runScriptViaRecords({
   scriptName,
@@ -153,8 +166,6 @@ async function runScriptViaRecords({
   layout = LAYOUT_SERVICEBON,
 }) {
   if (!scriptName) throw new Error("scriptName is required");
-
-  const token = await getToken();
 
   const payloadString = JSON.stringify(
     payloadObj && typeof payloadObj === "object" ? payloadObj : {}
@@ -167,27 +178,20 @@ async function runScriptViaRecords({
     `&script=${encodeURIComponent(scriptName)}` +
     `&script.param=${encodeURIComponent(payloadString)}`;
 
-  const call = async (tok) =>
+  return withTokenRetry((tok) =>
     jsonFetch(url, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${tok}`,
         "Content-Type": "application/json",
       },
-    });
-
-  let r = await call(token);
-
-  if (r.status === 401) {
-    cachedToken = null;
-    r = await call(await getToken());
-  }
-
-  return r;
+    })
+  );
 }
 
 /**
- * ✅ Script runner via _find (POST) met niet-lege criteria + script.param
+ * Script runner via _find (POST)
+ * Dit is veiliger voor grotere payloads omdat script.param in body gaat
  */
 async function runScriptViaFind({
   scriptName,
@@ -197,8 +201,6 @@ async function runScriptViaFind({
   limit = 1,
 }) {
   if (!scriptName) throw new Error("scriptName is required");
-
-  const token = await getToken();
 
   const payloadString = JSON.stringify(
     payloadObj && typeof payloadObj === "object" ? payloadObj : {}
@@ -215,7 +217,7 @@ async function runScriptViaFind({
     "script.param": payloadString,
   };
 
-  const call = async (tok) =>
+  return withTokenRetry((tok) =>
     jsonFetch(url, {
       method: "POST",
       headers: {
@@ -223,40 +225,28 @@ async function runScriptViaFind({
         "Content-Type": "application/json",
       },
       body: JSON.stringify(bodyObj),
-    });
-
-  let r = await call(token);
-
-  if (r.status === 401) {
-    cachedToken = null;
-    r = await call(await getToken());
-  }
-
-  return r;
+    })
+  );
 }
 
 // ---------- ROUTES ----------
 app.get("/health", (_, res) => res.type("text/plain").send("OK"));
 
-/* 🧪 TEST ROUTE — check outbound connectivity */
 app.get("/test", async (_req, res) => {
   try {
     const response = await fetch("https://www.google.com");
     const html = await response.text();
-    res
-      .status(200)
-      .send(
-        `Connected!<br>Status: ${response.status}<br><pre>${html.substring(
-          0,
-          300
-        )}...</pre>`
-      );
+    res.status(200).send(
+      `Connected!<br>Status: ${response.status}<br><pre>${html.substring(
+        0,
+        300
+      )}...</pre>`
+    );
   } catch (err) {
     res.status(500).send(`Connection failed: ${err.message}`);
   }
 });
 
-/* 🌐 GET public IP */
 app.get("/whois-ip", async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: "unauthorized" });
@@ -272,16 +262,20 @@ app.get("/whois-ip", async (req, res) => {
         const r = await fetch(url);
         if (!r.ok) continue;
         const text = await r.text();
+
         try {
           const j = JSON.parse(text);
           const ip = j.ip || j.ip_addr || j.ip_address;
           if (ip) return res.json({ ip });
         } catch {
           const cand = text.trim();
-          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand))
+          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(cand)) {
             return res.json({ ip: cand });
+          }
         }
-      } catch {}
+      } catch {
+        // probeer volgende endpoint
+      }
     }
 
     res.status(502).json({ error: "could not determine IP" });
@@ -290,7 +284,7 @@ app.get("/whois-ip", async (req, res) => {
   }
 });
 
-/* 🔍 Debiteur zoeken (ZOEKSTUK EXACT zoals in jouw index) */
+/* 🔍 Debiteur zoeken */
 app.get("/debiteur/search", async (req, res) => {
   const qRaw = (req.query.q || "").toString();
   const q = qRaw.trim();
@@ -301,26 +295,24 @@ app.get("/debiteur/search", async (req, res) => {
   const wildcard = `*${q}*`;
 
   try {
-    const token = await getToken();
-
     const baseQuery = [];
     if (isNumeric) baseQuery.push({ debiteurNummer: q });
     baseQuery.push({ debiteurNaam: wildcard });
 
-    const callFind = async (query) =>
+    const callFind = (tok, query) =>
       jsonFetch(
-        `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Debiteur_Rest/_find`,
+        `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}/layouts/Debiteur_Rest/_find`,
         {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${token}`,
+            Authorization: `Bearer ${tok}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({ query, limit: 50 }),
         }
       );
 
-    let { status, json } = await callFind(baseQuery);
+    let { status, json } = await withTokenRetry((tok) => callFind(tok, baseQuery));
     let fmCode = json?.messages?.[0]?.code;
 
     if (status === 200 && fmCode === "0") {
@@ -328,10 +320,10 @@ app.get("/debiteur/search", async (req, res) => {
       return res.json(
         records.map((rec) => ({
           recordId: rec.recordId,
-          debiteurNummer: rec.fieldData.debiteurNummer,
-          debiteurNaam: rec.fieldData.debiteurNaam,
-          telefoon: rec.fieldData.algTelefoon,
-          email: rec.fieldData.algEmail,
+          debiteurNummer: rec.fieldData?.debiteurNummer ?? null,
+          debiteurNaam: rec.fieldData?.debiteurNaam ?? null,
+          telefoon: rec.fieldData?.algTelefoon ?? null,
+          email: rec.fieldData?.algEmail ?? null,
         }))
       );
     }
@@ -347,9 +339,7 @@ app.get("/debiteur/search", async (req, res) => {
       { "debiteur_ADRESSEN::Postcode": wildcard },
     ];
 
-    const second = await callFind(addressQuery);
-    status = second.status;
-    json = second.json;
+    ({ status, json } = await withTokenRetry((tok) => callFind(tok, addressQuery)));
     fmCode = json?.messages?.[0]?.code;
 
     if (status === 200 && fmCode === "0") {
@@ -357,15 +347,17 @@ app.get("/debiteur/search", async (req, res) => {
       return res.json(
         records.map((rec) => ({
           recordId: rec.recordId,
-          debiteurNummer: rec.fieldData.debiteurNummer,
-          debiteurNaam: rec.fieldData.debiteurNaam,
-          telefoon: rec.fieldData.algTelefoon,
-          email: rec.fieldData.algEmail,
+          debiteurNummer: rec.fieldData?.debiteurNummer ?? null,
+          debiteurNaam: rec.fieldData?.debiteurNaam ?? null,
+          telefoon: rec.fieldData?.algTelefoon ?? null,
+          email: rec.fieldData?.algEmail ?? null,
         }))
       );
     }
 
-    if (status === 200 && fmCode === "401") return res.json({ error: "no matches" });
+    if (status === 200 && fmCode === "401") {
+      return res.json({ error: "no matches" });
+    }
 
     console.error("FileMaker error in addressQuery:", status, JSON.stringify(json));
     return res.json({ error: "no matches" });
@@ -378,26 +370,27 @@ app.get("/debiteur/search", async (req, res) => {
 /* 🏠 Debiteur adres ophalen */
 app.get("/debiteur/address", async (req, res) => {
   const debiteurNummer = (req.query.debiteurNummer || "").toString().trim();
+
   if (!debiteurNummer) {
     return res.status(400).json({ error: "debiteurNummer is required" });
   }
 
   try {
-    const token = await getToken();
-
-    const { status, json } = await jsonFetch(
-      `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Debiteur_Rest/_find`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          query: [{ debiteurNummer }],
-          limit: 1,
-        }),
-      }
+    const { status, json } = await withTokenRetry((tok) =>
+      jsonFetch(
+        `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}/layouts/Debiteur_Rest/_find`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tok}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            query: [{ debiteurNummer }],
+            limit: 1,
+          }),
+        }
+      )
     );
 
     const fmCode = json?.messages?.[0]?.code;
@@ -405,7 +398,7 @@ app.get("/debiteur/address", async (req, res) => {
       return res.json({ address: null });
     }
 
-    const rec = json.response?.data?.[0];
+    const rec = json?.response?.data?.[0];
     const fieldData = rec?.fieldData || {};
     const portals = rec?.portalData?.debiteur_ADRESSEN || [];
 
@@ -453,8 +446,6 @@ app.get("/servicebon/search", async (req, res) => {
   const wildcard = `*${q}*`;
 
   try {
-    const token = await getToken();
-
     const fmQuery = [
       { projectcode: wildcard },
       { projectNaam: wildcard },
@@ -472,16 +463,18 @@ app.get("/servicebon/search", async (req, res) => {
       { "project_SERVICENUMMER::omschrijvingKort": wildcard },
     ];
 
-    const { status, json } = await jsonFetch(
-      `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Servicebon_Rest/_find`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ query: fmQuery, limit: 50 }),
-      }
+    const { status, json } = await withTokenRetry((tok) =>
+      jsonFetch(
+        `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}/layouts/Servicebon_Rest/_find`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tok}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ query: fmQuery, limit: 50 }),
+        }
+      )
     );
 
     const fmCode = json?.messages?.[0]?.code;
@@ -492,32 +485,34 @@ app.get("/servicebon/search", async (req, res) => {
         const f = rec.fieldData || {};
         return {
           recordId: rec.recordId,
-          projectcode: f.projectcode,
-          projectNaam: f.projectNaam,
-          debiteurNummer: f["PROJECT::debiteurNummer"],
-          debiteurNaam: f["PROJECT::debiteurNaam"],
-          adresLabelBezoek: f["PROJECT::adresLabelBezoek"],
+          projectcode: f.projectcode ?? null,
+          projectNaam: f.projectNaam ?? null,
+          debiteurNummer: f["PROJECT::debiteurNummer"] ?? null,
+          debiteurNaam: f["PROJECT::debiteurNaam"] ?? null,
+          adresLabelBezoek: f["PROJECT::adresLabelBezoek"] ?? null,
           straat: f["project_ADRESSEN~bezoek::straat"] ?? null,
           huisnummer: f["project_ADRESSEN~bezoek::huisnummer"] ?? null,
           toevoeging: f["project_ADRESSEN~bezoek::toevoeging"] ?? null,
-          contractNummer: f["project_SERVICECONTRACTEN::contractNummer"],
-          contractCode: f["project_SERVICECONTRACTEN::contractCode"],
-          machineCode: f["project_SERVICECONTRACTEN::machine"],
-          machineType: f["project_SERVICECONTRACTEN::machineType"],
-          servicenummerId: f.id_servicenummer,
-          servicenummer: f.servicenummer,
-          servicebonnummer: f.servicebonnummer,
-          machineOmschrijving: f["project_SERVICENUMMER::omschrijvingKort"],
-          meldingsdatum: f.__createDate,
-          contractDatumStart: f["project_SERVICECONTRACTEN::datumStart"],
-          contractDatumEinde: f["project_SERVICECONTRACTEN::datumEinde"],
+          contractNummer: f["project_SERVICECONTRACTEN::contractNummer"] ?? null,
+          contractCode: f["project_SERVICECONTRACTEN::contractCode"] ?? null,
+          machineCode: f["project_SERVICECONTRACTEN::machine"] ?? null,
+          machineType: f["project_SERVICECONTRACTEN::machineType"] ?? null,
+          servicenummerId: f.id_servicenummer ?? null,
+          servicenummer: f.servicenummer ?? null,
+          servicebonnummer: f.servicebonnummer ?? null,
+          machineOmschrijving: f["project_SERVICENUMMER::omschrijvingKort"] ?? null,
+          meldingsdatum: f.__createDate ?? null,
+          contractDatumStart: f["project_SERVICECONTRACTEN::datumStart"] ?? null,
+          contractDatumEinde: f["project_SERVICECONTRACTEN::datumEinde"] ?? null,
         };
       });
 
       return res.json(mapped);
     }
 
-    if (status === 200 && fmCode === "401") return res.json({ error: "no matches" });
+    if (status === 200 && fmCode === "401") {
+      return res.json({ error: "no matches" });
+    }
 
     console.error("FileMaker find error in /servicebon/search:", status, JSON.stringify(json));
     return res.status(502).json({
@@ -552,8 +547,6 @@ app.get("/product/search", async (req, res) => {
   const wildcard = `*${q}*`;
 
   try {
-    const token = await getToken();
-
     const baseOr = [
       { productNummerIntern: wildcard },
       { productNummerLeverancier: wildcard },
@@ -570,16 +563,18 @@ app.get("/product/search", async (req, res) => {
       return r;
     });
 
-    const { status, json } = await jsonFetch(
-      `${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}/layouts/Product_rest/_find`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ query: fmQuery, limit }),
-      }
+    const { status, json } = await withTokenRetry((tok) =>
+      jsonFetch(
+        `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}/layouts/Product_rest/_find`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tok}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ query: fmQuery, limit }),
+        }
+      )
     );
 
     const fmCode = json?.messages?.[0]?.code;
@@ -613,7 +608,9 @@ app.get("/product/search", async (req, res) => {
       );
     }
 
-    if (status === 200 && fmCode === "401") return res.json({ error: "no matches" });
+    if (status === 200 && fmCode === "401") {
+      return res.json({ error: "no matches" });
+    }
 
     console.error("FileMaker find error in /product/search:", status, JSON.stringify(json));
     return res.status(502).json({
@@ -627,15 +624,20 @@ app.get("/product/search", async (req, res) => {
   }
 });
 
-// ✅ Preview → FileMaker script: API_Servicebon_PREVIEW
+// ✅ Preview -> nu via _find POST body
 app.post("/servicebon/preview", async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: "unauthorized" });
 
-    const { status, json } = await runScriptViaRecords({
+    const payloadString = JSON.stringify(req.body || {});
+    console.log("[servicebon/preview] payload bytes:", Buffer.byteLength(payloadString, "utf8"));
+
+    const { status, json } = await runScriptViaFind({
       scriptName: "API_Servicebon_PREVIEW",
       payloadObj: req.body,
       layout: LAYOUT_SERVICEBON,
+      findCriteria: DEFAULT_FIND_CRITERIA,
+      limit: 1,
     });
 
     return res.status(status).json(json);
@@ -645,15 +647,20 @@ app.post("/servicebon/preview", async (req, res) => {
   }
 });
 
-// ✅ Receive → FileMaker script: API_Servicebon_RECEIVE
+// ✅ Receive -> nu via _find POST body
 app.post("/servicebon/receive", async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: "unauthorized" });
 
-    const { status, json } = await runScriptViaRecords({
+    const payloadString = JSON.stringify(req.body || {});
+    console.log("[servicebon/receive] payload bytes:", Buffer.byteLength(payloadString, "utf8"));
+
+    const { status, json } = await runScriptViaFind({
       scriptName: "API_Servicebon_RECEIVE",
       payloadObj: req.body,
       layout: LAYOUT_SERVICEBON,
+      findCriteria: DEFAULT_FIND_CRITERIA,
+      limit: 1,
     });
 
     return res.status(status).json(json);
@@ -665,10 +672,8 @@ app.post("/servicebon/receive", async (req, res) => {
 
 /**
  * ==========================
- * ✅ WHITELIST voor /fm/request
+ * WHITELIST voor /fm/request
  * ==========================
- * Alleen deze layouts mogen via de generieke proxy.
- * En alleen de actions onder /layouts/<layout>/<action>
  */
 const FM_LAYOUT_WHITELIST = new Map([
   ["Debiteur_Rest", new Set(["_find", "records"])],
@@ -679,22 +684,21 @@ const FM_LAYOUT_WHITELIST = new Map([
   ["Productprijs_rest", new Set(["_find", "records"])],
   ["REST_Inkooporder", new Set(["_find", "records"])],
   ["REST_InkooporderRegel", new Set(["_find", "records"])],
-
-  // in jouw code/gebruik ook aanwezig:
   ["Product_rest", new Set(["_find", "records"])],
   ["Servicebon_Rest", new Set(["_find", "records"])],
   ["REST_Servicebon", new Set(["_find", "records"])],
 ]);
 
 function parseLayoutAndAction(path) {
-  // /layouts/<layout>/<action>...
   const m = String(path).match(/^\/layouts\/([^/]+)\/([^/?#]+)/);
   if (!m) return null;
-  return { layout: decodeURIComponent(m[1]), action: decodeURIComponent(m[2]) };
+  return {
+    layout: decodeURIComponent(m[1]),
+    action: decodeURIComponent(m[2]),
+  };
 }
 
 function isWhitelistedPath(path) {
-  // allow /layouts (getLayouts)
   if (path === "/layouts") return true;
 
   const parsed = parseLayoutAndAction(path);
@@ -706,47 +710,51 @@ function isWhitelistedPath(path) {
   return allowedActions.has(parsed.action);
 }
 
-// ---------- HOOFDENDPOINT /fm/request (AUTH + minimale hardening + whitelist) ----------
 const ALLOWED_METHODS = new Set(["GET", "POST", "PATCH", "DELETE"]);
 
 app.post("/fm/request", async (req, res) => {
   try {
     if (!okAuth(req)) return res.status(401).json({ error: "unauthorized" });
 
-    let { method, path, body, action, layout, recordId, fieldData } =
-      req.body || {};
+    let { method, path, body, action, layout, recordId, fieldData } = req.body || {};
 
     if (action === "getLayouts") {
       method = "GET";
       path = "/layouts";
     }
+
     if (action === "getRecord") {
-      if (!layout || !recordId)
+      if (!layout || !recordId) {
         return res.status(400).json({ error: "layout/recordId required" });
+      }
       method = "GET";
       path = `/layouts/${layout}/records/${recordId}`;
     }
+
     if (action === "createRecord") {
       method = "POST";
       path = `/layouts/${layout}/records`;
       body = { fieldData };
     }
 
-    if (!method || !path)
+    if (!method || !path) {
       return res.status(400).json({ error: "method/path required" });
+    }
 
     method = String(method).toUpperCase();
-    if (!ALLOWED_METHODS.has(method))
+
+    if (!ALLOWED_METHODS.has(method)) {
       return res.status(400).json({ error: "method not allowed" });
+    }
 
-    if (!path.startsWith("/layouts"))
+    if (!path.startsWith("/layouts")) {
       return res.status(400).json({ error: "path must start with /layouts" });
+    }
 
-    // minimal hardening: geen querystring inject via path
-    if (path.includes("?"))
+    if (path.includes("?")) {
       return res.status(400).json({ error: "querystring not allowed in path" });
+    }
 
-    // ✅ WHITELIST CHECK
     if (!isWhitelistedPath(path)) {
       return res.status(403).json({
         error: "path not whitelisted",
@@ -754,29 +762,26 @@ app.post("/fm/request", async (req, res) => {
       });
     }
 
-    const token = await getToken();
+    const fmUrl = `${FM_HOST}/fmi/data/vLatest/databases/${encodeURIComponent(FM_DB)}${path}`;
 
-    const callFM = async (tok) =>
-      jsonFetch(`${FM_HOST}/fmi/data/vLatest/databases/${FM_DB}${path}`, {
+    const r = await withTokenRetry((tok) =>
+      jsonFetch(fmUrl, {
         method,
         headers: {
           Authorization: `Bearer ${tok}`,
           "Content-Type": "application/json",
         },
         body: method === "GET" ? undefined : JSON.stringify(body || {}),
-      });
+      })
+    );
 
-    let r = await callFM(token);
-    if (r.status === 401) {
-      cachedToken = null;
-      r = await callFM(await getToken());
-    }
-
-    res.status(r.status).json(r.json);
+    return res.status(r.status).json(r.json);
   } catch (e) {
     console.error("Error in /fm/request:", e);
-    res.status(500).json({ error: String(e.message || e) });
+    return res.status(500).json({ error: String(e.message || e) });
   }
 });
 
-app.listen(PORT, () => console.log(`FM proxy running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`FM proxy running on port ${PORT}`);
+});
