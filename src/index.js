@@ -76,7 +76,7 @@ let cachedToken = null;
 let tokenExp = 0;
 
 const LAYOUT_SERVICEBON = "REST_Servicebon";
-const DEFAULT_FIND_CRITERIA = { g_api_enabled: "*" };
+const DEFAULT_FIND_CRITERIA = { g_api_enabled: "1" };
 
 // ---------- GENERIEKE FETCH HELPER ----------
 async function jsonFetch(url, opts = {}) {
