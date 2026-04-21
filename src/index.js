@@ -695,6 +695,7 @@ const FM_LAYOUT_WHITELIST = new Map([
   ["REST_ServicebonRegel", new Set(["_find", "records"])],
   ["REST_Voorraadmutatieregel", new Set(["_find", "records"])],
   ["REST_Voorraadmutatie", new Set(["_find", "records"])],
+  ["REST_ProductVoorraad", new Set(["_find", "records"])],
 ]);
 
 function parseLayoutAndAction(path) {
