@@ -62,7 +62,7 @@ app.use(
 
 app.use(morgan("tiny"));
 
-const limiter = new RateLimiterMemory({ points: 60, duration: 60 });
+const limiter = new RateLimiterMemory({ points: 120, duration: 60 });
 app.use(async (req, res, next) => {
   try {
     await limiter.consume(req.ip);
